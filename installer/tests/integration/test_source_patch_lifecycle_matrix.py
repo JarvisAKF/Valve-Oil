@@ -208,12 +208,12 @@ class SourcePatchLifecycleMatrixTests(unittest.TestCase):
         self._run_install(paths)
 
         printer_cfg = (printer_root / "config/printer.cfg").read_text(encoding="utf-8")
-        # Sensorless X/Y homing stays single-touch at 55 mm/s. Probing travel matches the Max 4's, and the Plus 5
-        # keeps its own top speed.
+        # Sensorless X/Y homing stays single-touch at 55 mm/s. The open-loop X/Y motors top out at 400 mm/s,
+        # probing travel included.
         for stepper in ("stepper_x", "stepper_y"):
             self.assertEqual(klipper_cfg.resolve_unique_option(printer_cfg, stepper, "homing_speed").value, "55")
             self.assertEqual(klipper_cfg.resolve_unique_option(printer_cfg, stepper, "homing_retract_dist").value, "0")
-        self._assert_speeds(printer_root, max_velocity="600", bed_mesh="565", z_tilt="565")
+        self._assert_speeds(printer_root, max_velocity="400", bed_mesh="400", z_tilt="400")
         self.assertEqual(
             klipper_cfg.resolve_unique_option(printer_cfg, "virtual_sdcard", "on_error_gcode").value,
             "OPTIMIZED_CANCEL_PRINT_ON_ERROR",
@@ -256,6 +256,46 @@ class SourcePatchLifecycleMatrixTests(unittest.TestCase):
                 self.assertEqual(_section_hashes(restored), _section_hashes(data))
         self.assertFalse(installed.exists())
         self.assertEqual((paths.managed_klipper_root / "klippy/extras/homing.py").read_bytes(), stock_source)
+
+    def test_plus5_update_lowers_speeds_above_400_and_uninstall_restores_the_originals(self):
+        firmware = "01.01.02.01"
+        printer_root, paths, _ = self._fixture(firmware, source_variant="sync-reset")
+        cfg = printer_root / "config/printer.cfg"
+        # The earlier release's 565 mm/s probing travel, and an operator's own top speed above 400.
+        text = cfg.read_text(encoding="utf-8")
+        for section in ("z_tilt", "bed_mesh"):
+            text = klipper_cfg.set_option_value(text, section, "speed", "565")
+        cfg.write_text(klipper_cfg.set_option_value(text, "printer", "max_velocity", "500"), encoding="utf-8")
+        write_installed_state(
+            printer_root / "config/tltg_optimized_state.yaml",
+            InstalledState(
+                schema_version=1,
+                package_id="qidi-max4-optimized",
+                package_version=self.manifest.package.version,
+                runtime_firmware=firmware,
+                backup_label="prior-install",
+                installed_at="2026-11-12T00:00:00Z",
+                managed_tree=ManagedTreeState("config/tltg-optimized-macros", ()),
+                patch_ledger=tuple(
+                    PatchLedgerEntry(f"{section}_speed", "config/printer.cfg", section, "speed", "150", "565",
+                                     "applied")
+                    for section in ("z_tilt", "bed_mesh")
+                ),
+            ),
+        )
+
+        self._run_install(paths)
+        self._assert_speeds(printer_root, max_velocity="400", bed_mesh="400", z_tilt="400")
+
+        run_uninstall(
+            paths,
+            self.manifest,
+            self.compatibility,
+            PlainReporter(io.StringIO()),
+            input_stream=io.StringIO("Y\n"),
+            urlopen=self._fixture_urlopen(printer_root),
+        )
+        self._assert_speeds(printer_root, max_velocity="500", bed_mesh="150", z_tilt="150")
 
     def test_install_leaves_extra_modules_readable_by_klipper(self):
         # Klipper may run as another user than the installer.

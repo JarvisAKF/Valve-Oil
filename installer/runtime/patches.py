@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from . import klipper_cfg
-from .manifest import select_patch_variant
+from .manifest import patch_variant_maximum, select_patch_variant
 from .models import PatchLedgerEntry, PatchResult, PatchSpec, SectionPatchSpec
 
 
@@ -22,7 +22,7 @@ def classify_install_patch(current: str, patch: PatchSpec, firmware_version: str
         classification = INSTALL_APPLIED
     elif _prior_managed_value(current, prior_state, patch):
         classification = INSTALL_APPLIED
-    elif _above_maximum(current, patch):
+    elif _above_maximum(current, patch_variant_maximum(patch, variant)):
         classification = INSTALL_APPLIED
         ledger_expected = current
     else:
@@ -40,32 +40,33 @@ def classify_install_patch(current: str, patch: PatchSpec, firmware_version: str
     )
 
 
-def _above_maximum(current: str, patch: PatchSpec) -> bool:
-    if patch.maximum is None:
+def _above_maximum(current: str, maximum: float | None) -> bool:
+    if maximum is None:
         return False
     try:
-        return float(current) > patch.maximum
+        return float(current) > maximum
     except ValueError:
         return False
 
 
 
 def _prior_managed_value(current: str, prior_state, patch: PatchSpec) -> bool:
-    prior_value = {
-        "stepper_x_homing_speed": "100",
-        "stepper_y_homing_speed": "100",
-        "stepper_x_homing_retract_speed": "1000.0",
-        "stepper_y_homing_retract_speed": "1000.0",
-        "z_tilt_speed": "600",
-        "bed_mesh_speed": "600",
-    }.get(patch.id)
-    if prior_value is None or current != prior_value or prior_state is None:
+    # Values earlier releases set. The Plus 5 had 565 mm/s probing travel before its 400 mm/s limit.
+    prior_values = {
+        "stepper_x_homing_speed": ("100",),
+        "stepper_y_homing_speed": ("100",),
+        "stepper_x_homing_retract_speed": ("1000.0",),
+        "stepper_y_homing_retract_speed": ("1000.0",),
+        "z_tilt_speed": ("600", "565"),
+        "bed_mesh_speed": ("600", "565"),
+    }.get(patch.id, ())
+    if current not in prior_values or prior_state is None:
         return False
     return any(
         entry.id == patch.id
         and entry.target_tuple == patch.target_tuple
         and entry.expected == select_patch_variant(patch, prior_state.runtime_firmware).expected
-        and entry.desired == prior_value
+        and entry.desired == current
         and entry.install_result in {INSTALL_APPLIED, INSTALL_NOOP_DESIRED}
         for entry in prior_state.patch_ledger
     )
