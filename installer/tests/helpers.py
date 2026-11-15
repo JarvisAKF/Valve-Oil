@@ -99,15 +99,17 @@ def fake_qidiclient(variant: int = 0) -> tuple[bytes, bytes, bytes]:
     popup = qidiclient_firmware_popup
     stock = (
         b"\x7fELF\xff\xfe" + bytes([variant]) + bytes(57) + popup.BRANCH_IF_EQUAL + bytes(64) + popup.BRANCH_IF_EQUAL + bytes(60)
-        + popup.STORE_NEED_UPDATE + bytes(28) + popup.EXTRACT_PROLOGUE + bytes(24)
+        + popup.STORE_NEED_UPDATE + bytes(28) + popup.EXTRACT_PROLOGUE + bytes(24) + popup.DETECTOR_CHANGED + bytes(12)
     )
     sites = (
         popup.Site(64, popup.BRANCH_IF_EQUAL, popup.BRANCH_IF_NOT_LONGER),
         popup.Site(132, popup.BRANCH_IF_EQUAL, popup.BRANCH_IF_NOT_LONGER),
         popup.Site(196, popup.STORE_NEED_UPDATE, popup.STORE_ZERO, blocking=True),
         popup.Site(228, popup.EXTRACT_PROLOGUE, popup.RETURN_FALSE, blocking=True),
+        popup.Site(260, popup.DETECTOR_CHANGED, popup.DETECTOR_UNCHANGED),
     )
-    unblocked = stock.replace(popup.BRANCH_IF_EQUAL, popup.BRANCH_IF_NOT_LONGER)
+    unblocked = stock.replace(popup.BRANCH_IF_EQUAL, popup.BRANCH_IF_NOT_LONGER).replace(
+        popup.DETECTOR_CHANGED, popup.DETECTOR_UNCHANGED)
     blocked = unblocked.replace(popup.STORE_NEED_UPDATE, popup.STORE_ZERO).replace(popup.EXTRACT_PROLOGUE, popup.RETURN_FALSE)
     popup.BUILDS[hashlib.sha256(stock).hexdigest()] = popup.Build(
         size=len(stock), sites=sites,

@@ -13,9 +13,11 @@ import hashlib
 import http.client
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -139,6 +141,44 @@ def check_free_space(paths, target, *, disk_usage=shutil.disk_usage, unpacked: b
     needed = required_free_bytes(target, downloaded=downloaded_bytes(paths, target), unpacked=unpacked)
     if _free(home(paths), disk_usage) < needed:
         raise PackageError(f"The firmware update needs {needed // 2 ** 20} MiB free in {home(paths)}.", code=FREE_SPACE)
+
+
+# What a firmware update short of space removes: files that aren't the operator's and that nothing on the printer
+# reads again. The system journal beyond JOURNAL_KEEP, apt's download cache, the archive the touchscreen's online update
+# leaves in ~/download, and rotated logs in printer_data/logs (klippy.log.2026-11-10, tltg_box_link.log.1) older than
+# ROTATED_LOG_DAYS, so the logs a support issue asks for stay. Prints, timelapses, and QIDI's update folder, whose THR
+# image the board firmware reads, are left alone.
+JOURNAL_KEEP = "50M"
+ONLINE_UPDATE_ARCHIVE = "download/online_update.zip"
+ROTATED_LOG_DAYS = 2
+_ROTATED_LOG = re.compile(r"\.log\.(\d{4}-\d{2}-\d{2}|\d+)$")
+
+
+def free_up_space(paths, *, sudo, reporter, disk_usage=shutil.disk_usage, clock=time.time) -> int:
+    """Remove the files above; the bytes this freed. sudo(command) runs a command as root."""
+    before = _free(home(paths), disk_usage)
+    cutoff = clock() - ROTATED_LOG_DAYS * 24 * 3600
+    try:
+        logs = list((paths.printer_data_root / "logs").iterdir())
+    except OSError:
+        logs = []
+    for path in logs:
+        try:
+            if _ROTATED_LOG.search(path.name) and not path.is_symlink() and path.is_file() \
+                    and path.stat().st_mtime < cutoff:
+                path.unlink()
+        except OSError:
+            pass
+    for command in (["journalctl", f"--vacuum-size={JOURNAL_KEEP}"], ["apt-get", "clean"],
+                    ["rm", "-f", str(home(paths) / ONLINE_UPDATE_ARCHIVE)]):
+        try:
+            sudo(command)
+        except (OSError, subprocess.SubprocessError, InstallerError):
+            pass
+    freed = max(0, _free(home(paths), disk_usage) - before)
+    reporter.line(f"Freed {freed // 2 ** 20} MiB for the firmware update by removing old logs and a leftover QIDI "
+                  "download.")
+    return freed
 
 
 def download(paths, target, *, reporter, urlopen=mirror_urlopen, attempts: int = 3) -> Path:

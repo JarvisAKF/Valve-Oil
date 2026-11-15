@@ -6,7 +6,7 @@ import subprocess
 import urllib.request
 
 from .addons_cli import maybe_remove_addons
-from . import klipper_cfg, messages, patches
+from . import boot_logo, box_config, klipper_cfg, messages, patches
 from .auto_update import (
     SYSTEM_ROOT_ENV,
     auto_updates_configured,
@@ -480,6 +480,10 @@ def _execute_uninstall(
             run=run,
             urlopen=urlopen,
         )
+        boot_logo.uninstall(paths, reporter=reporter, environ=environ, input_stream=input_stream, run=run)
+        # QIDI's touchscreen app is back and writes box.cfg again; the Box monitor and its rule are gone with the host
+        # changes, and its records go with them.
+        box_config.remove_files(paths)
 
         if state_path.exists():
             journal.note_write()

@@ -20,7 +20,7 @@ def _printer(root: Path) -> RuntimePaths:
     (printer_data / "config/tltg-optimized-macros").mkdir(parents=True)
     (printer_data / "model").mkdir()
     (home / "update").mkdir()
-    (home / "tltg-optimized-macros/installer").mkdir(parents=True)
+    (home / "valve-oil/installer").mkdir(parents=True)
     (home / "klipper/klippy/extras").mkdir(parents=True)
     return RuntimePaths(
         bundle_root=REPO_ROOT,
@@ -80,7 +80,7 @@ class InstallerOwnershipRepairTests(unittest.TestCase):
             _write(config / "tltg_optimized_state.yaml"),
             _write(config / "tltg-optimized-macros/cooling.cfg"),
             _write(self.home / "klipper/klippy/extras/tltg_box_eject.py"),
-            self.home / "tltg-optimized-macros",
+            self.home / "valve-oil",
         }
         link = config / "tltg-link.cfg"
         link.symlink_to(outside)
@@ -96,10 +96,10 @@ class InstallerOwnershipRepairTests(unittest.TestCase):
 
         self.assertEqual(changed, len(installer_owned) + 1)
         chowned = self._chowned()
-        self.assertEqual(chowned["-R -h"], {str(self.home / "tltg-optimized-macros")})
+        self.assertEqual(chowned["-R -h"], {str(self.home / "valve-oil")})
         self.assertEqual(
             chowned["-h"],
-            {str(path) for path in installer_owned | {link}} - {str(self.home / "tltg-optimized-macros")},
+            {str(path) for path in installer_owned | {link}} - {str(self.home / "valve-oil")},
         )
         everything = set().union(*chowned.values())
         self.assertFalse(everything & {str(path) for path in qidi_owned})

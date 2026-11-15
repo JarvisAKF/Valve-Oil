@@ -9,6 +9,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import types
 import unittest
 from dataclasses import replace
@@ -224,6 +225,9 @@ class BoxFirmwareFlowTests(unittest.TestCase):
         update = paths.printer_data_root.parent / "update"
         update.mkdir()
         (update / "QD_MAX4_BOX_02.03.01.21_20260124.bin").write_bytes(printer.stock)
+        # The Boxes are flashed at the same time: each transfer waits here until the other has started.
+        together = threading.Barrier(2, timeout=5)
+        printer.on_transfer = lambda kwargs: together.wait()
         self.assertEqual(self.execute(paths, printer, reporter, "install"), 0)
         self.assertEqual(sorted(printer.transfers), [("mcu_box1", False), ("mcu_box2", False)])
         self.assertEqual({protocol.image_identity(app, printer.manifest) for app in printer.apps.values()}, {"patched"})
@@ -791,6 +795,9 @@ class BoardAdmissionTests(unittest.TestCase):
                 boards = {"thr": ("admitted", "stock"), "mcu": ("admitted", "stock"), "box1": ("admitted", "stock")}
                 boards[board] = unadmitted
                 paths, printer, reporter = self.fixture(boards)
+                # The boards are read at the same time: each read waits here until every one has started.
+                together = threading.Barrier(len(boards), timeout=5)
+                printer.on_snapshot = lambda kwargs: together.wait()
                 with self.assertRaises(board_firmware.BoardAdmissionError):
                     self.preflight(paths, printer, reporter)
                 # Every board was read, nothing programmed, and the services run again.
@@ -828,7 +835,7 @@ class BoardAdmissionTests(unittest.TestCase):
                 self.preflight(paths, printer, reporter)
         except KeyboardInterrupt:
             self.fail("Ctrl-C stopped reading the boards with the services stopped")
-        self.assertEqual((printer.snapshots, set(seen)), (["thr", "mcu"], {(True, signal.SIG_IGN)}))
+        self.assertEqual((sorted(printer.snapshots), set(seen)), (["mcu", "thr"], {(True, signal.SIG_IGN)}))
         # Klipper wouldn't start; the touchscreen and the update timer run again anyway.
         self.assertEqual(printer.states, {**printer.original, "klipper.service": "inactive"})
         self.assertIs(signal.getsignal(signal.SIGINT), interrupt)
@@ -865,7 +872,9 @@ class BoardAdmissionTests(unittest.TestCase):
                                                  "box1": ("admitted", "stock")}, existing=True)
         board_printer, admission = self.preflight(paths, printer, reporter)
         self.assertEqual(admission.board("thr").state, board_firmware.UNRECOGNIZED_BOOTLOADER)
-        self.assertFalse(admission.delivery_admitted or block_qidi_package_updates(admission))
+        # No firmware for the THR or the mainboard, and QIDI's updates stay blocked while the issue is open.
+        self.assertFalse(admission.delivery_admitted)
+        self.assertTrue(block_qidi_package_updates(admission))
         calls, delivery = self.deliver(paths, printer, reporter, board_printer, admission)
         # No THR or mainboard firmware; the Box keeps getting Valve Oil's Box firmware as before.
         self.assertEqual(calls, [("box", (1,), None)])
@@ -888,7 +897,7 @@ class BoardAdmissionTests(unittest.TestCase):
         reads = len(printer.snapshots)
         board_printer, admission = self.preflight(paths, printer, reporter)
         self.assertTrue(admission.delivery_admitted and block_qidi_package_updates(admission))
-        self.assertEqual(printer.snapshots[reads:], ["thr", "mcu"])
+        self.assertEqual(sorted(printer.snapshots[reads:]), ["mcu", "thr"])
         calls, _ = self.deliver(paths, printer, reporter, board_printer, admission)
         self.assertEqual([call[0] for call in calls], ["thr", "mcu"])
         self.assertFalse((paths.printer_data_root / "logs/tltg_thr_firmware.json").exists())
@@ -1022,9 +1031,8 @@ class BoardAdmissionTests(unittest.TestCase):
         code, block, _, _ = install("--flash-thr-fifo")
         self.assertEqual((code, block), (1, "not installed"))
         # Its dry run reads nothing, so it leaves QIDI's updates as they are.
-        code, block, _, output = install("--dry-run")
+        code, block, _, _ = install("--dry-run")
         self.assertEqual((code, block), (0, None))
-        self.assertIn("QIDI's firmware updates are left as they are", output)
         # Every board admitted: blocked. The install settles what the last check listed for this release, such as
         # installing it again, and leaves a newer release waiting.
         printer.boards["thr"] = ("admitted", "stock")
@@ -1032,23 +1040,20 @@ class BoardAdmissionTests(unittest.TestCase):
                                       pending=(valve_oil_status.PendingItem(kind="release", version="99.1.1.1"),
                                                valve_oil_status.PendingItem(kind="release", reinstall=True,
                                                                             version=MANIFEST.package.version)))
-        code, block, deliver, output = install()
+        code, block, deliver, _ = install()
         self.assertEqual((code, block), (0, True))
         self.assertEqual([item.version for item in valve_oil_status.load_status(paths).pending], ["99.1.1.1"])
-        self.assertIn("QIDI's firmware updates stay blocked", output)
         self.assertTrue(deliver.call_args.kwargs["admission"].admitted)
         self.assertFalse(deliver.call_args.kwargs["dry_run"])
-        # An existing install whose THR this release doesn't admit: unblocked.
+        # An existing install whose THR this release doesn't admit: installed, with QIDI's updates still blocked.
         (paths.config_root / "tltg_optimized_state.yaml").write_text("")
         printer.boards["thr"] = ("unknown", "stock")
-        code, block, _, output = install()
-        self.assertEqual((code, block), (0, False))
-        self.assertIn("QIDI's firmware updates are left to the touchscreen (this release doesn't support the THR", output)
+        code, block, _, _ = install()
+        self.assertEqual((code, block), (0, True))
         # A board that can't be read, with no earlier record of it, never switches QIDI's updater back on.
         printer.print_state = "printing"
-        code, block, _, output = install()
+        code, block, _, _ = install()
         self.assertEqual((code, block), (0, None))
-        self.assertIn("could not be read", output)
 
     def update_check(self, paths, printer, reporter, *, enrolled, box_outcome=("flashed", "")):
         """One update check's board part: what it finds and publishes, and on an enrolled printer what it does, with

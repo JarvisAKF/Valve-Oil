@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -14,7 +15,7 @@ from .errors import ActivePrintError, InstallerError, KlipperBusyError, PrinterS
 from .fs_atomic import atomic_delete, atomic_write_text
 from .interaction import prompt_yes
 from .models import RuntimePaths
-from .sudo import SudoError, authenticate_sudo, run_sudo_or_raise
+from .sudo import SudoError, authenticate_sudo, run_sudo, run_sudo_or_raise
 
 HOST_REBOOT_SCHEMA_VERSION = 1
 HOST_REBOOT_REASON = "rockchip_root_sync"
@@ -23,6 +24,12 @@ HOST_REBOOT_UNIT = "tltg-optimized-host-reboot"
 HOST_REBOOT_FOLLOWUP_UNIT = "tltg-optimized-host-reboot-followup"
 # Automatic updates reboot only after Klipper has been this long without motion, heat, or a running command.
 KLIPPER_IDLE_SECONDS = 600
+# A scheduled reboot waits this long for a printer whose state can't be read yet, such as one whose Klipper is starting
+# again and again while the touchscreen app finds the boards after a QIDI firmware update.
+STATE_WAIT_SECONDS = 300
+STATE_POLL_SECONDS = 10
+# A QIDI firmware update reboots this long after it has finished.
+FIRMWARE_UPDATE_REBOOT_DELAY = "5s"
 
 
 class HostRebootError(InstallerError):
@@ -267,22 +274,70 @@ def maybe_schedule_recommended_reboot(
     return True
 
 
-def _printer_allows_reboot(paths: RuntimePaths, *, reporter, require_klipper_idle: bool, urlopen) -> bool:
+def _printer_allows_reboot(paths: RuntimePaths, *, reporter, require_klipper_idle: bool, urlopen,
+                           wait_seconds: float = 0, sleep=time.sleep, clock=time.monotonic) -> bool:
+    """Whether the printer is idle. A state that can't be read is read again for up to `wait_seconds`."""
+    deadline = clock() + wait_seconds
+    while True:
+        try:
+            if require_klipper_idle:
+                safety.ensure_klipper_idle(paths.moonraker_url, idle_seconds=KLIPPER_IDLE_SECONDS, urlopen=urlopen)
+            else:
+                safety.ensure_printer_idle(paths.moonraker_url, urlopen=urlopen)
+        except ActivePrintError:
+            reporter.line(messages.HOST_REBOOT_DEFERRED_ACTIVE_PRINT)
+            return False
+        except KlipperBusyError:
+            reporter.line(messages.HOST_REBOOT_DEFERRED_KLIPPER_BUSY)
+            return False
+        except PrinterStateError:
+            if clock() >= deadline:
+                reporter.line(messages.HOST_REBOOT_DEFERRED_UNKNOWN_STATE)
+                return False
+            sleep(STATE_POLL_SECONDS)
+            continue
+        return True
+
+
+def _reboot_unit_command(paths: RuntimePaths, *, delay: str, require_klipper_idle: bool) -> list[str]:
+    """The transient unit that runs complete-host-reboot, which checks the printer again before rebooting."""
+    return [
+        "systemd-run",
+        f"--unit={HOST_REBOOT_UNIT}",
+        f"--on-active={delay}",
+        "--collect",
+        f"--uid={os.getuid()}",
+        sys.executable,
+        "-I",
+        "-S",
+        str(paths.bundle_root / "installer/runtime/bootstrap.py"),
+        "complete-host-reboot",
+        "--plain",
+        *(["--require-klipper-idle"] if require_klipper_idle else []),
+    ]
+
+
+def reboot_pending(paths: RuntimePaths) -> bool:
+    """A reboot this boot still needs: the Rockchip repair's, or the one recommended for the host tuning."""
     try:
-        if require_klipper_idle:
-            safety.ensure_klipper_idle(paths.moonraker_url, idle_seconds=KLIPPER_IDLE_SECONDS, urlopen=urlopen)
-        else:
-            safety.ensure_printer_idle(paths.moonraker_url, urlopen=urlopen)
-    except ActivePrintError:
-        reporter.line(messages.HOST_REBOOT_DEFERRED_ACTIVE_PRINT)
+        marker = read_host_reboot_marker(paths)
+        if marker is not None:
+            return marker.boot_id == current_boot_id(paths)
+        return reboot_recommended(paths)
+    except HostRebootError:
         return False
-    except KlipperBusyError:
-        reporter.line(messages.HOST_REBOOT_DEFERRED_KLIPPER_BUSY)
+
+
+def schedule_reboot_after_firmware_update(paths: RuntimePaths, *, password: str, run=subprocess.run) -> bool:
+    """At the end of a QIDI firmware update, reboot for its install's host changes once the update has ended and the
+    printer is idle, whether a session follows the update or not. Returns whether the reboot was scheduled."""
+    if not reboot_pending(paths):
         return False
-    except PrinterStateError:
-        reporter.line(messages.HOST_REBOOT_DEFERRED_UNKNOWN_STATE)
+    command = _reboot_unit_command(paths, delay=FIRMWARE_UPDATE_REBOOT_DELAY, require_klipper_idle=False)
+    try:
+        return run_sudo(command, run=run, password=password, timeout=30).returncode == 0
+    except (OSError, subprocess.SubprocessError):
         return False
-    return True
 
 
 def _schedule_reboot(
@@ -306,20 +361,7 @@ def _schedule_reboot(
             input_stream=input_stream,
         )
         run_sudo_or_raise(
-            [
-                "systemd-run",
-                f"--unit={HOST_REBOOT_UNIT}",
-                "--on-active=10s",
-                "--collect",
-                f"--uid={os.getuid()}",
-                sys.executable,
-                "-I",
-                "-S",
-                str(paths.bundle_root / "installer/runtime/bootstrap.py"),
-                "complete-host-reboot",
-                "--plain",
-                *(["--require-klipper-idle"] if require_klipper_idle else []),
-            ],
+            _reboot_unit_command(paths, delay="5s", require_klipper_idle=require_klipper_idle),
             messages.HOST_REBOOT_SCHEDULE_FAILED,
             run=run,
             password=password,
@@ -380,8 +422,11 @@ def perform_scheduled_host_reboot(
     require_klipper_idle: bool = False,
     urlopen=urllib.request.urlopen,
     run=subprocess.run,
+    sleep=time.sleep,
+    clock=time.monotonic,
 ) -> bool:
-    """Reboot for the pending Rockchip marker, or for a recommendation when recommended is set."""
+    """Reboot for the pending Rockchip marker, or for a recommendation when recommended is set. A printer whose state
+    can't be read yet is read again for a few minutes first."""
     if recommended:
         if not reboot_recommended(paths):
             return False
@@ -389,7 +434,8 @@ def perform_scheduled_host_reboot(
         marker = read_host_reboot_marker(paths)
         if marker is None or marker.boot_id != current_boot_id(paths):
             return False
-    if not _printer_allows_reboot(paths, reporter=reporter, require_klipper_idle=require_klipper_idle, urlopen=urlopen):
+    if not _printer_allows_reboot(paths, reporter=reporter, require_klipper_idle=require_klipper_idle, urlopen=urlopen,
+                                  wait_seconds=STATE_WAIT_SECONDS, sleep=sleep, clock=clock):
         return False
     try:
         password = authenticate_sudo(

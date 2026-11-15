@@ -2,7 +2,7 @@
 waiting, whether or not automatic updates are on.
 
 The service starts it detached, in its own session, as
-`python3 -I -S ~/tltg-optimized-macros/installer/runtime/bootstrap.py update-now`, and returns at once. Its progress
+`python3 -I -S ~/valve-oil/installer/runtime/bootstrap.py update-now`, and returns at once. Its progress
 and result go to the pending-work status file (valve_oil_status), and its output to the service's job log.
 """
 from __future__ import annotations

@@ -61,7 +61,9 @@ def read_printer_info(moonraker_url: str, *, urlopen=urllib.request.urlopen) -> 
     pid = result.get("process_id") if isinstance(result, dict) else None
     state = result.get("state") if isinstance(result, dict) else None
     if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0 or not isinstance(state, str):
-        raise ProcessRestartError("Moonraker returned an invalid Klipper process identity.")
+        # QIDI's Moonraker matches Klipper's replies to requests by object id, which Python reuses: while Klipper starts,
+        # a late reply to another request (a status query) can come back as this one. Ask again.
+        raise ProcessRestartTransientError("Moonraker returned an invalid Klipper process identity.")
     return pid, state
 
 

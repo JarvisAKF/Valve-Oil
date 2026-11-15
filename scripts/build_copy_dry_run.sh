@@ -12,9 +12,9 @@ Environment:
   BUILD_ID           Dev bundle build id. Default: local
 
 This script:
-  1. Builds dist/tltg-optimized-macros-dev.tar.gz
+  1. Builds dist/valve-oil-dev.tar.gz
   2. Copies it to the printer home directory
-  3. Extracts ~/tltg-optimized-macros on the printer
+  3. Extracts ~/valve-oil on the printer
   4. Runs ./install.sh --dry-run --plain
 EOF
 }
@@ -103,12 +103,12 @@ fi
 printf 'Building dev installer bundle...\n'
 "${BUILD_CMD[@]}"
 
-BUNDLE_PATH="$REPO_ROOT/dist/tltg-optimized-macros-dev.tar.gz"
+BUNDLE_PATH="$REPO_ROOT/dist/valve-oil-dev.tar.gz"
 [ -f "$BUNDLE_PATH" ] || die "Expected bundle not found: $BUNDLE_PATH"
 
 SSH_TARGET="${PRINTER_USER}@${PRINTER_HOST}"
-REMOTE_BUNDLE='~/tltg-optimized-macros-dev.tar.gz'
-REMOTE_DIR='~/tltg-optimized-macros'
+REMOTE_BUNDLE='~/valve-oil-dev.tar.gz'
+REMOTE_DIR='~/valve-oil'
 
 printf 'Copying bundle to %s...\n' "$SSH_TARGET"
 "${SCP_CMD[@]}" "$BUNDLE_PATH" "$SSH_TARGET:$REMOTE_BUNDLE"
@@ -116,7 +116,7 @@ printf 'Copying bundle to %s...\n' "$SSH_TARGET"
 printf 'Extracting bundle on %s...\n' "$SSH_TARGET"
 "${SSH_CMD[@]}" "$SSH_TARGET" "rm -rf $REMOTE_DIR && tar -xzf $REMOTE_BUNDLE -C ~/"
 
-REMOTE_INSTALL_CMD='cd ~/tltg-optimized-macros && ./install.sh --dry-run --plain'
+REMOTE_INSTALL_CMD='cd ~/valve-oil && ./install.sh --dry-run --plain'
 if [ "$DEBUG_INSTALL" -eq 1 ]; then
   REMOTE_INSTALL_CMD="$REMOTE_INSTALL_CMD --debug"
 fi

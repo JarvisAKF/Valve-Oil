@@ -9,6 +9,7 @@ from typing import Callable
 from . import messages
 from .errors import InstallerError
 from .models import RuntimePaths
+from .naming import BUNDLE_ROOT_NAME
 from .sudo import SudoError, authenticate_sudo, run_sudo
 
 RunFn = Callable[..., subprocess.CompletedProcess]
@@ -34,7 +35,7 @@ def repair_installer_ownership(
     files they created owned by root, so a later run could not open its lock,
     read its state, or replace its own bundle. Everything the project names
     `tltg` under printer_data, its config folder, the home folder, and
-    Klipper's extras belongs to that user, as an unprivileged run creates it;
+    Klipper's extras, and the installed bundle in the home folder, belongs to that user, as an unprivileged run creates it;
     QIDI's own files are left alone. Returns the number of entries changed.
     """
     try:
@@ -73,8 +74,10 @@ def repair_installer_ownership(
 def installer_entries(paths: RuntimePaths) -> list[Path]:
     """Every installer-created path, without following symbolic links."""
     roots: list[Path] = []
-    for directory in (paths.printer_data_root, paths.config_root, paths.printer_data_root.parent):
+    for directory in (paths.printer_data_root, paths.config_root):
         roots.extend(_named_children(directory))
+    roots.extend(_named_children(paths.printer_data_root.parent, extra_prefixes=(f".{BUNDLE_ROOT_NAME}.",),
+                                 extra_names=(BUNDLE_ROOT_NAME,)))
     extras = paths.managed_klipper_root / "klippy" / "extras"
     roots.extend(path for path in _named_children(extras) if path.name.endswith(".py"))
     entries: list[Path] = []
@@ -94,8 +97,11 @@ def _owner(path: Path) -> int | None:
         return None
 
 
-def _named_children(directory: Path) -> list[Path]:
+def _named_children(directory: Path, *, extra_prefixes: tuple[str, ...] = (), extra_names: tuple[str, ...] = ()) -> list[Path]:
+    """The installer's entries in `directory`: named `tltg` or `.tltg`, and in the home folder also the installed
+    bundle and its copies in progress (bootstrap.copy_bundle)."""
+    prefixes = INSTALLER_PREFIXES + extra_prefixes
     try:
-        return sorted(path for path in directory.iterdir() if path.name.startswith(INSTALLER_PREFIXES))
+        return sorted(path for path in directory.iterdir() if path.name.startswith(prefixes) or path.name in extra_names)
     except OSError:
         return []

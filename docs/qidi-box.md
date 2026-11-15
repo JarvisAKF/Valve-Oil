@@ -234,6 +234,20 @@ Pausing turns the nozzle off. With the Box, **Resume** first moves the toolhead 
 
 When filament leaves the toolhead sensor during a print, Klipper waits for the command that's running to finish before it handles the runout. A Box unload inside a resume or the print-start load runs within one command, so its runout used to be handled minutes later, once the new filament was already loaded: the print paused and QIDI's auto-reload ran, or, if the print had been cancelled meanwhile, the idle printer paused, homed, and reported `Auto reload failed`. The runout is now handled only if the toolhead sensor still reports no filament and the print is still running unpaused; otherwise the console says `TLTG_FILAMENT_SENSOR: ignoring an earlier toolhead sensor trip` and nothing else happens.
 
+## Connecting, disconnecting, and moving Boxes
+
+QIDI's touchscreen app writes the USB Boxes into `box.cfg` and restarts Klipper whenever the Boxes it finds change. It counted a Box board resetting, which drops the Boxes off USB for a few seconds after a Klipper start or a Box firmware flash, as a change, so Klipper could restart several times in a row for nothing. The restart at the app's start didn't check for a print, and its restart turned the heaters off. It numbered the Boxes by USB port, so a Box moved to another port took another Box's number and slots.
+
+With Valve Oil, its Box monitor does this instead:
+
+- **A Box keeps its number,** and so its slots and tool mapping, on any USB port. The first install records each Box's number from `box.cfg` as it is, so nothing is renumbered.
+- **`box.cfg` changes only when the Boxes do.** About 5 seconds after a Box connects or disconnects and the Boxes stop changing, it writes `box.cfg` in QIDI's layout, and only when the file would be different. Boxes dropping off USB and coming back leave it as it is.
+- **A new Box** gets the lowest number no connected Box has. While a Box is disconnected, the Boxes after it move up, since `box.cfg` can't skip a number, and they get their numbers and slots back when it's connected again. Connecting a new Box instead takes the disconnected Box's number.
+- **Klipper restarts only while the printer is idle,** with no print running or paused and no heater on, and the heaters are never turned off for it. Otherwise a printer warning says `A USB Box was connected or disconnected.`, and Klipper restarts once the printer is idle.
+- **Installs and board firmware go first.** While the installer runs or a board's firmware is written or waits for its rescue, the monitor changes nothing, and catches up when that ends.
+
+The touchscreen still shows the Boxes, their firmware, and its Box notices. This applies to the touchscreen apps of Max 4 firmware `01.01.07.01` and Plus 5 firmware `01.01.02.01`; with any other app, the app keeps managing `box.cfg` as before. A `box.cfg` you've edited, so it's no longer in QIDI's layout, is left as it is. Uninstall puts QIDI's app back, which writes `box.cfg` again when it next starts. RS-485 Boxes aren't in `box.cfg`, and aren't affected.
+
 ## Box disconnects
 
 See [Fixes](fixes.md#qidi-box-disconnects) for what this project changes, and [Troubleshooting](troubleshooting.md#box-link-monitor) to record why a Box drops.

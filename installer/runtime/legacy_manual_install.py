@@ -9,6 +9,7 @@ from . import messages
 from .backup import create_config_backup, format_backup_timestamp, utc_now
 from .errors import InstallerError, OperationCancelled
 from .fs_atomic import atomic_write_bytes
+from .install_screen import touchscreen_held
 from .interaction import confirm_yes
 from .mirror import mirror_tree, remove_tree, validate_managed_tree_source
 from .models import Manifest, RuntimePaths
@@ -226,6 +227,8 @@ def _restore_stock_files(*, source_root: Path, paths: RuntimePaths, journal: Rol
 
 
 def _restart_qidiclient(*, reporter, input_stream, environ: dict[str, str], run) -> None:
+    if touchscreen_held():
+        return  # the install starts the app when it ends (install_screen.py)
     if shutil.which("systemctl") is None:
         raise LegacyManualInstallError(messages.LEGACY_MANUAL_QIDICLIENT_RESTART_FAILED)
     if shutil.which("sudo") is None:

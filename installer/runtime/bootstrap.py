@@ -8,7 +8,7 @@ from pathlib import Path
 
 PRINTER_DATA_ROOT_ENV = "TLTG_OPTIMIZED_PRINTER_DATA_ROOT"
 DEFAULT_PRINTER_DATA_ROOT = "/home/qidi/printer_data"
-BUNDLE_DIRECTORY = "tltg-optimized-macros"
+BUNDLE_DIRECTORY = "valve-oil"  # naming.BUNDLE_ROOT_NAME; this module imports nothing from the bundle
 
 
 class BootstrapError(RuntimeError):

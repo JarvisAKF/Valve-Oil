@@ -112,7 +112,7 @@ class InstallLatestTests(unittest.TestCase):
         home.mkdir()
         archive_path = _make_archive(
             temp_root,
-            {"tltg-optimized-macros/install.sh": b"#!/bin/sh\ntouch \"$HOME/installed\"\n"},
+            {"valve-oil/install.sh": b"#!/bin/sh\ntouch \"$HOME/installed\"\n"},
         )
 
         result = _run_install_latest(
@@ -124,12 +124,12 @@ class InstallLatestTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Missing required tool: sha256sum or shasum", result.stderr)
         self.assertFalse((home / "installed").exists())
-        self.assertFalse((home / "tltg-optimized-macros").exists())
+        self.assertFalse((home / "valve-oil").exists())
 
     def test_invalid_archive_layout_fails_before_replacing_existing_install(self):
         temp_root = temp_path("install-latest-")
         home = temp_root / "home"
-        install_dir = home / "tltg-optimized-macros"
+        install_dir = home / "valve-oil"
         install_dir.mkdir(parents=True)
         marker = install_dir / "keep.txt"
         marker.write_text("existing install", encoding="utf-8")
@@ -138,20 +138,20 @@ class InstallLatestTests(unittest.TestCase):
         result = _run_install_latest(home, archive_path)
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("Archive does not use the expected tltg-optimized-macros/ root.", result.stderr)
+        self.assertIn("Archive does not use the expected valve-oil/ root.", result.stderr)
         self.assertEqual(marker.read_text(encoding="utf-8"), "existing install")
 
     def test_valid_archive_replaces_install_and_runs_installer(self):
         temp_root = temp_path("install-latest-")
         home = temp_root / "home"
-        install_dir = home / "tltg-optimized-macros"
+        install_dir = home / "valve-oil"
         install_dir.mkdir(parents=True)
         (install_dir / "old.txt").write_text("old install", encoding="utf-8")
         archive_path = _make_archive(
             temp_root,
             {
-                "tltg-optimized-macros/install.sh": b"#!/bin/sh\ntouch \"$HOME/installed\"\n",
-                "tltg-optimized-macros/new.txt": b"new install\n",
+                "valve-oil/install.sh": b"#!/bin/sh\ntouch \"$HOME/installed\"\n",
+                "valve-oil/new.txt": b"new install\n",
             },
         )
 

@@ -277,7 +277,8 @@ def check_capture(stock, boot, manifest):
     commands = []
     addresses = []
     constants = {"MCU": "stm32f103xe", "SERIAL_BAUD": 500000, "CLOCK_FREQ": 72000000}
-    parser = SimpleNamespace(get_constants=lambda: constants, get_version_info=lambda: ("vendor", "build"))
+    parser = SimpleNamespace(get_constants=lambda: constants, get_version_info=lambda: ("vendor", "build"),
+                             create_command=lambda text: text)
 
     class Loop:
         def register_callback(self, callback):
@@ -289,22 +290,36 @@ def check_capture(stock, boot, manifest):
         def finalize(self):
             pass
 
+    def answer(command):
+        commands.append(command)
+        _, order, address = command.split()
+        address, order = int(address.split("=")[1]), int(order.split("=")[1])
+        addresses.append(address)
+        if address in (0xe000ed00, 0xe0042000, 0x1ffff7e0):
+            return {"val": {0xe000ed00: 0x410fc241, 0xe0042000: 0x21040414, 0x1ffff7e0: 128}[address]}
+        assert order == 2 and 0x08000000 <= address <= 0x0801fffc, "Read escaped flash/ID-register allowlist"
+        return {"val": int.from_bytes(flash[address - 0x08000000:address - 0x08000000 + 4], "little")}
+
     class Reader:
+        # The reads klipper_debug_read sends many at a time arrive through the registered debug_result handler.
+        reactor = SimpleNamespace(monotonic=lambda: 0.0, pause=lambda waketime: waketime)
+
         def __init__(self, loop):
-            pass
+            self.handlers = {}
         def _start_session(self, port):
             return True
         def get_msgparser(self):
             return parser
+        def get_default_command_queue(self):
+            return None
+        def register_response(self, callback, name):
+            self.handlers[name] = callback
+        def raw_send(self, command, minclock, reqclock, queue):
+            if not command.startswith("debug_read "):
+                raise AssertionError("Capture sent a reset or write command: " + command)
+            self.handlers["debug_result"](answer(command))
         def send_with_response(self, command, response):
-            commands.append(command)
-            _, order, address = command.split()
-            address, order = int(address.split("=")[1]), int(order.split("=")[1])
-            addresses.append(address)
-            if address in (0xe000ed00, 0xe0042000, 0x1ffff7e0):
-                return {"val": {0xe000ed00: 0x410fc241, 0xe0042000: 0x21040414, 0x1ffff7e0: 128}[address]}
-            assert order == 2 and 0x08000000 <= address <= 0x0801fffc, "Read escaped flash/ID-register allowlist"
-            return {"val": int.from_bytes(flash[address - 0x08000000:address - 0x08000000 + 4], "little")}
+            return answer(command)
         def send(self, command):
             raise AssertionError("Capture sent a reset or write command: " + command)
         def disconnect(self):

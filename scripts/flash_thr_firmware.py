@@ -18,9 +18,11 @@ MANIFEST = Path(__file__).resolve().parents[1] / "firmware/max4-thr-valve-oil-v1
 if __package__:
     from . import thr_bootloaders
     from .build_box_firmware import programmable_images, terminal_signals_ignored
+    from .klipper_debug_read import read_bytes
 else:
     import thr_bootloaders
     from build_box_firmware import programmable_images, terminal_signals_ignored
+    from klipper_debug_read import read_bytes
 
 identify_bootloader = thr_bootloaders.identify_bootloader
 
@@ -397,12 +399,10 @@ def application_session(manifest: dict, *, reset: bool = False,
                         "id_registers": {name: hex(read(address, order)) for name, address, order in (
                             ("cpuid", 0xe000ed00, 2), ("dbgmcu_idcode", 0xe0042000, 2),
                             ("flash_size_kib", 0x1ffff7e0, 1))}}
-            boot = b"".join(read(address).to_bytes(4, "little")
-                            for address in range(0x08000000, 0x08008000, 4))
+            boot = read_bytes(reader, 0x08000000, 0x08008000)
             supported = len(boot) == 0x8000 and digest(boot) in thr_bootloaders.ADMITTED_BOOTLOADERS
             length = manifest["thr"]["size"] if supported else 0x18000
-            region = b"".join(read(address).to_bytes(4, "little")
-                              for address in range(0x08008000, 0x08008000 + length, 4))
+            region = read_bytes(reader, 0x08008000, 0x08008000 + length)
             app = region[:manifest["thr"]["size"]]
             result["snapshot"] = boot, app, metadata, region
             if reset:

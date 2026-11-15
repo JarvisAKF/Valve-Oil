@@ -1,10 +1,12 @@
-"""The touchscreen message while a firmware update has QIDI's touchscreen app stopped.
+"""The touchscreen message while Valve Oil has QIDI's touchscreen app stopped: a firmware update, or an install
+(install_screen.py).
 
-A still image is written to the framebuffer: landscape text drawn upright on the Max 4's 800x480 panel and turned for
-the Plus 5's 480x800 panel, which QIDI's app also draws on its side (see tltg_remote_screen.py). The geometry, pixel
-format, and line length are read from the framebuffer each time; the text is drawn from the 5x7 font below, so no
-image file or third-party module is needed. Drawing is best-effort: any failure is logged and the update goes on.
-The app repaints the whole panel when it starts again.
+A still image is written to the framebuffer: a landscape screen drawn upright on the Max 4's 800x480 panel and turned
+for the Plus 5's 480x800 panel, which QIDI's app also draws on its side (see tltg_remote_screen.py). The geometry, pixel
+format, and line length are read from the framebuffer each time. A screen is either text drawn from the 5x7 font below,
+or an Image: an 800x480 PNG rendered by scripts/render_touchscreen_images.py, saved so that zlib alone decodes it, with
+text to draw instead when it can't be shown. No third-party module is needed. Drawing is best-effort: any failure is
+logged and the work goes on. The app repaints the whole panel when it starts again.
 
 QIDI's app puts the panel to sleep by setting the backlight's brightness to 0 and leaves it there when it is stopped,
 so the message would sit on a dark panel; light() turns the backlight on. The app sets its own brightness as it starts.
@@ -16,6 +18,8 @@ import itertools
 import os
 import shlex
 import struct
+import zlib
+from dataclasses import dataclass
 from pathlib import Path
 
 FRAMEBUFFER = "/dev/fb0"
@@ -30,13 +34,6 @@ TEXT = (235, 235, 235)
 WARNING = (255, 176, 0)
 
 # Lines of (scale, color, text), centered top to bottom on the upright landscape screen.
-UPDATING = (
-    (4, TEXT, "Valve Oil is updating"),
-    (4, TEXT, "the printer's firmware."),
-    (4, WARNING, "Don't turn the printer off."),
-    (3, TEXT, "The printer restarts by itself"),
-    (3, TEXT, "when the update is done."),
-)
 STOPPED = (
     (4, TEXT, "The firmware update"),
     (4, TEXT, "didn't finish."),
@@ -44,6 +41,41 @@ STOPPED = (
     (3, TEXT, "Open Fluidd on a computer"),
     (3, TEXT, "to see what to do next."),
 )
+
+INSTALL_STOPPED = (
+    (4, TEXT, "Valve Oil's install"),
+    (4, TEXT, "didn't finish."),
+    (4, WARNING, "Don't turn the printer off."),
+    (3, TEXT, "Run the command the installer"),
+    (3, TEXT, "printed to finish it."),
+)
+
+
+@dataclass(frozen=True)
+class Image:
+    """An upright landscape PNG, and the text to draw when it can't be shown."""
+
+    path: Path
+    fallback: tuple
+
+
+IMAGE_SIZE = (800, 480)
+IMAGES_DIR = Path(__file__).resolve().parents[1] / "system/touchscreen"
+INSTALLING_IMAGE = IMAGES_DIR / "installing.png"
+UPDATING_IMAGE = IMAGES_DIR / "updating.png"
+UPDATING = Image(UPDATING_IMAGE, (
+    (4, TEXT, "Valve Oil is updating"),
+    (4, TEXT, "the printer's firmware."),
+    (4, WARNING, "Don't turn the printer off."),
+    (3, TEXT, "The printer restarts by itself"),
+    (3, TEXT, "when the update is done."),
+))
+INSTALLING = Image(INSTALLING_IMAGE, (
+    (5, TEXT, "Installing Valve Oil"),
+    (4, WARNING, "Don't turn the printer off."),
+    (3, TEXT, "The touchscreen comes back"),
+    (3, TEXT, "when the install is done."),
+))
 
 # 5x7 glyphs: seven rows, bit 4 the leftmost column.
 FONT = {
@@ -70,15 +102,31 @@ FONT = {
 GLYPH_WIDTH, GLYPH_HEIGHT, GLYPH_GAP = 5, 7, 1
 
 
-def draw(lines=UPDATING, *, device: str = FRAMEBUFFER, reporter=None) -> bool:
-    """Write the message to the framebuffer; False, after logging why, when it can't."""
+def draw(screen=UPDATING, *, device: str = FRAMEBUFFER, reporter=None) -> bool:
+    """Write the screen, lines of text or an Image, to the framebuffer; False, after logging why, when it can't. An
+    Image that can't be shown is drawn as its fallback text."""
+    if isinstance(screen, Image):
+        try:
+            _draw(_image_rows(screen.path), device)
+            return True
+        except Exception as exc:  # noqa: BLE001 - the work must never stop for the screen
+            if not Path(device).exists():
+                return _failed(reporter, exc)
+            if reporter is not None:
+                reporter.line(f"  (The touchscreen image could not be shown, so its text is: {type(exc).__name__}: "
+                              f"{exc})")
+            screen = screen.fallback
     try:
-        _draw(lines, device)
+        _draw(_text_rows(screen), device)
         return True
-    except Exception as exc:  # noqa: BLE001 - the update must never stop for the screen
-        if reporter is not None:
-            reporter.line(f"  (The touchscreen message could not be drawn: {type(exc).__name__}: {exc})")
-        return False
+    except Exception as exc:  # noqa: BLE001 - the work must never stop for the screen
+        return _failed(reporter, exc)
+
+
+def _failed(reporter, exc) -> bool:
+    if reporter is not None:
+        reporter.line(f"  (The touchscreen message could not be drawn: {type(exc).__name__}: {exc})")
+    return False
 
 
 def light(sudo, *, reporter=None) -> bool:
@@ -100,7 +148,66 @@ def light(sudo, *, reporter=None) -> bool:
         return False
 
 
-def _draw(lines, device: str) -> None:
+def decode_png(data: bytes) -> list[bytes]:
+    """The rows of an 8-bit RGB, non-interlaced PNG whose rows all use filter 0, as RGB bytes; ValueError for any
+    other PNG, which scripts/render_touchscreen_images.py never writes."""
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError("not a PNG")
+    position, header, compressed = 8, None, []
+    while position + 8 <= len(data):
+        length, kind = struct.unpack_from(">I4s", data, position)
+        chunk = data[position + 8:position + 8 + length]
+        if len(chunk) != length:
+            raise ValueError("truncated PNG")
+        if kind == b"IHDR":
+            header = struct.unpack(">IIBBBBB", chunk)
+        elif kind == b"IDAT":
+            compressed.append(chunk)
+        elif kind == b"IEND":
+            break
+        position += 12 + length
+    if header is None or header[2:] != (8, 2, 0, 0, 0):
+        raise ValueError(f"unsupported PNG format {header}")
+    width, height = header[:2]
+    raw = zlib.decompress(b"".join(compressed))
+    stride = 1 + 3 * width
+    if len(raw) != stride * height:
+        raise ValueError("PNG data doesn't match its size")
+    rows = []
+    for start in range(0, len(raw), stride):
+        if raw[start] != 0:
+            raise ValueError("PNG rows must use filter 0")
+        rows.append(raw[start + 1:start + stride])
+    return rows
+
+
+def _image_rows(path: Path):
+    """A function giving the image's rows of RGB keys for an upright screen of (width, height)."""
+    rows = decode_png(Path(path).read_bytes())
+
+    def rows_for(width: int, height: int) -> list[list[int]]:
+        if (width, height) != (len(rows[0]) // 3, len(rows)):
+            raise ValueError(f"the image is {len(rows[0]) // 3}x{len(rows)}, the screen {width}x{height}")
+        return [[(row[i] << 16) | (row[i + 1] << 8) | row[i + 2] for i in range(0, len(row), 3)] for row in rows]
+
+    return rows_for
+
+
+def _text_rows(lines):
+    """A function giving the text's rows of RGB keys for an upright screen of (width, height)."""
+    keys = [_key(color) for color in (BACKGROUND, TEXT, WARNING)]
+
+    def rows_for(width: int, height: int) -> list[list[int]]:
+        return [[keys[value] for value in row] for row in _render(lines, width, height)]
+
+    return rows_for
+
+
+def _key(color) -> int:
+    return (color[0] << 16) | (color[1] << 8) | color[2]
+
+
+def _draw(rows_for, device: str) -> None:
     fd = os.open(device, os.O_RDWR | os.O_CLOEXEC)
     try:
         info = struct.unpack_from("17I", fcntl.ioctl(fd, FBIOGET_VSCREENINFO, bytes(160)))
@@ -117,13 +224,14 @@ def _draw(lines, device: str) -> None:
         # QIDI's app draws a landscape UI turned 90 degrees counterclockwise into a portrait framebuffer.
         turned = height > width
         upright_width, upright_height = (height, width) if turned else (width, height)
-        mask = _render(lines, upright_width, upright_height)
-        colors = [_pixel(color, channels, pixel_bytes) for color in (BACKGROUND, TEXT, WARNING)]
+        upright = rows_for(upright_width, upright_height)
+        pixels: dict[int, bytes] = {}
         start = yoffset * stride + xoffset * pixel_bytes
         for y in range(height):
             # Upright (x, y) shows at framebuffer (y, height - 1 - x) when turned.
-            row = mask[y] if not turned else bytes(mask[x][height - 1 - y] for x in range(width))
-            data = b"".join(colors[value] * len(tuple(run)) for value, run in itertools.groupby(row))
+            row = upright[y] if not turned else [upright[x][height - 1 - y] for x in range(width)]
+            data = b"".join(_cached_pixel(pixels, key, channels, pixel_bytes) * len(tuple(run))
+                            for key, run in itertools.groupby(row))
             os.pwrite(fd, data, start + y * stride)
     finally:
         os.close(fd)
@@ -151,6 +259,13 @@ def _render(lines, width: int, height: int) -> list[bytearray]:
                             mask[y][x:x + scale] = bytes([index]) * len(mask[y][x:x + scale])
         top += line_height
     return mask
+
+
+def _cached_pixel(cache: dict, key: int, channels, pixel_bytes: int) -> bytes:
+    pixel = cache.get(key)
+    if pixel is None:
+        pixel = cache[key] = _pixel((key >> 16, (key >> 8) & 0xFF, key & 0xFF), channels, pixel_bytes)
+    return pixel
 
 
 def _pixel(color, channels, pixel_bytes: int) -> bytes:

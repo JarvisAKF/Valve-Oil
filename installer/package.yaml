@@ -6,7 +6,7 @@ package:
   # The id predates multi-printer support; installed state records it, so it stays.
   id: qidi-max4-optimized
   display_name: Valve Oil
-  version: "26.11.13.1"
+  version: "26.11.15.1"
 # Each firmware version belongs to exactly one printer; patch variants are keyed by firmware version.
 # target_firmware is the QIDI firmware this release brings the printer to: its newest listed firmware, downloaded only
 # from this project's mirror release and checked against the archive's size and SHA-256. Every other listed firmware
@@ -368,6 +368,8 @@ patches:
           expected: "10.0"
           desired: "5.0"
 
+    # Max 4: the closed-loop motors' belt-speed limit. Plus 5: its open-loop X/Y motors skipped steps on
+    # 565 mm/s Z-tilt travel, so its top speed is 400.
     - id: printer_max_velocity
       file: "config/printer.cfg"
       section: "printer"
@@ -377,8 +379,12 @@ patches:
         - firmwares: ["01.01.06.03", "01.01.06.04", "01.01.06.05", "01.01.07.01"]
           expected: "800"
           desired: "565"
+        - firmwares: ["01.01.02.01"]
+          expected: "600"
+          desired: "400"
+          maximum: "400"
 
-    # Probing travel is 565 mm/s on every printer. The Plus 5 keeps QIDI's max_velocity of 600.
+    # Probing travel runs at each printer's top speed.
     - id: z_tilt_speed
       file: "config/printer.cfg"
       section: "z_tilt"
@@ -388,9 +394,13 @@ patches:
         - firmwares: ["01.01.06.03"]
           expected: "150"
           desired: "565"
-        - firmwares: ["01.01.06.04", "01.01.06.05", "01.01.07.01", "01.01.02.01"]
+        - firmwares: ["01.01.06.04", "01.01.06.05", "01.01.07.01"]
           expected: "150"
           desired: "565"
+        - firmwares: ["01.01.02.01"]
+          expected: "150"
+          desired: "400"
+          maximum: "400"
 
     - id: bed_mesh_speed
       file: "config/printer.cfg"
@@ -401,9 +411,13 @@ patches:
         - firmwares: ["01.01.06.03"]
           expected: "150"
           desired: "565"
-        - firmwares: ["01.01.06.04", "01.01.06.05", "01.01.07.01", "01.01.02.01"]
+        - firmwares: ["01.01.06.04", "01.01.06.05", "01.01.07.01"]
           expected: "150"
           desired: "565"
+        - firmwares: ["01.01.02.01"]
+          expected: "150"
+          desired: "400"
+          maximum: "400"
 
     - id: virtual_sdcard_on_error_gcode
       file: "config/printer.cfg"

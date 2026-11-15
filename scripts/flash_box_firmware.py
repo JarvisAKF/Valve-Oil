@@ -20,9 +20,11 @@ from pathlib import Path
 if __package__:
     from .build_box_firmware import (PATCH_MANIFEST, PREDECESSOR, known_images, load_manifest, programmable_images,
                                      terminal_signals_ignored)
+    from .klipper_debug_read import read_bytes
 else:
     from build_box_firmware import (PATCH_MANIFEST, PREDECESSOR, known_images, load_manifest, programmable_images,
                                     terminal_signals_ignored)
+    from klipper_debug_read import read_bytes
 
 UNSUPPORTED = 3
 SERVICES = ("klipper.service", "qidi-client.service", "tltg-optimized-auto-update.timer")
@@ -289,9 +291,7 @@ def application_session(tty: str, manifest: dict, *, application: bool = True, r
                 raise ValueError("Unexpected application identity")
 
             def block(start, end):
-                return b"".join((int(reader.send_with_response(
-                    "debug_read order=2 addr=%d" % address, "debug_result")["val"]) & 0xFFFFFFFF
-                ).to_bytes(4, "little") for address in range(start, end, 4))
+                return read_bytes(reader, start, end)
 
             version, build_versions = parser.get_version_info()
             metadata = {"version": version, "build_versions": build_versions,

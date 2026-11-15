@@ -43,7 +43,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from . import qidi_package, safety, saved_calibration, update_screen, valve_oil_status
+from . import box_config, install_screen, qidi_package, safety, saved_calibration, update_screen, valve_oil_status
 from .auto_update import KIND_ENV, LOCK_HELD_ENV, TIMER_NAME, current_user
 from .backup import build_install_backup_label, create_config_backup, utc_now
 from .board_firmware import NEEDS_IMAGE, UNREAD, load_board_admission, record_board_admission
@@ -55,7 +55,8 @@ from .firmware import detect_firmware, detect_firmware_version_best_effort, supp
 from .fs_atomic import atomic_delete, atomic_write_text
 from .mainboard_firmware import mainboard_serial
 from .manifest import load_manifest
-from .naming import BUNDLE_ROOT_NAME, REPOSITORY_URL
+from .naming import ARCHIVE_NAME, BUNDLE_ROOT_NAME, REPOSITORY_URL
+from .host_reboot import schedule_reboot_after_firmware_update
 from .sudo import PUBLIC_DEFAULT_SUDO_PASSWORD, SudoError, authenticate_sudo, run_sudo, sudo_command
 from .system_optimizations import clear_carried_system_ledger, save_carried_system_ledger
 from .valve_oil_status import Blocker
@@ -66,6 +67,9 @@ UNIT_MARKER = "# tltg-optimized:firmware-update-unit\n"
 RESULT_FILE = ".tltg_firmware_update_result.json"
 RECORD_LOCK_FILE = ".tltg_firmware_update.lock"
 LOG_NAME = "update.log"
+# What QIDI's package scripts print, much of it in Chinese, kept out of the update's log and the session.
+PACKAGE_LOG_NAME = "qidi-package.log"
+PACKAGE_LOG_TAIL_LINES = 20  # shown when dpkg fails
 SCHEMA = 1
 QIDI_SERVICES = ("qidi-client.service", "klipper.service", "moonraker.service")  # stopped in this order
 TOUCHSCREEN = QIDI_SERVICES[0]
@@ -95,7 +99,7 @@ LABELS = {
 }
 
 # Results.
-NOT_NEEDED, NOT_STARTED, DECLINED, DRY_RUN = "not_needed", "not_started", "declined", "dry_run"
+NOT_NEEDED, NOT_STARTED, DRY_RUN = "not_needed", "not_started", "dry_run"
 RUNNING, SUCCEEDED, FAILED = "running", "succeeded", "failed"
 DURATION = "usually 10 to 30 minutes"
 LAST_ATTEMPT_FAILED = "the last attempt didn't finish"
@@ -142,6 +146,10 @@ def result_path(paths) -> Path:
 
 def log_path(paths) -> Path:
     return qidi_package.cache_dir(paths) / LOG_NAME
+
+
+def package_log_path(paths) -> Path:
+    return qidi_package.cache_dir(paths) / PACKAGE_LOG_NAME
 
 
 def load_record(paths) -> dict | None:
@@ -207,7 +215,7 @@ def _write_result(paths, record: dict, *, state: str, message: str, blockers=(),
 def release_command(release: str) -> str:
     """The command that installs Valve Oil `release` (a published release) and runs its installer."""
     base = f"{REPOSITORY_URL}/releases/download/v{release}"
-    return (f'TLTG_INSTALLER_ARCHIVE_URL={base}/tltg-optimized-macros.tar.gz /bin/bash -c "$(curl -fsSL '
+    return (f'TLTG_INSTALLER_ARCHIVE_URL={base}/{ARCHIVE_NAME} /bin/bash -c "$(curl -fsSL '
             f'{base}/install-latest.sh)"')
 
 
@@ -413,9 +421,10 @@ def start_firmware_update(*, paths, reporter, manifest, kind, environ, admission
                           clock=time.monotonic, disk_usage=shutil.disk_usage) -> FirmwareUpdateResult:
     """Start the firmware update this printer is waiting for, or report why it can't start.
 
-    A firmware update already recorded is resumed or followed instead. NOT_NEEDED, NOT_STARTED, and DECLINED leave the
-    printer as it was, so the caller installs Valve Oil for the current firmware; NOT_STARTED and DECLINED record the
-    update as waiting. kind is the run's status-file kind: "install", "update_now", or "automatic".
+    It starts without asking: every install, interactive or not, brings the printer to the release's target firmware.
+    A firmware update already recorded is resumed or followed instead. NOT_NEEDED and NOT_STARTED leave the printer as
+    it was, so the caller installs Valve Oil for the current firmware; NOT_STARTED records the update as waiting. kind
+    is the run's status-file kind: "install", "update_now", or "automatic".
     """
     if load_record(paths) is not None:
         result = resume_firmware_update(paths=paths, reporter=reporter, environ=environ, manifest=manifest,
@@ -437,27 +446,30 @@ def start_firmware_update(*, paths, reporter, manifest, kind, environ, admission
             if blocker.code == "board_not_admitted" and unread:
                 reporter.line("Firmware update dry-run: the install reads the THR and the mainboard first, which a "
                               "dry run doesn't, and starts the update only when this release supports both.")
+            elif blocker.code == qidi_package.FREE_SPACE:
+                reporter.line(f"Firmware update dry-run: {blocker.message}; the update would first remove old logs "
+                              "and a leftover QIDI download, then check again.")
             else:
                 reporter.line(f"Firmware update dry-run: it wouldn't start now: {blocker.message}.")
         reporter.line("Firmware update dry-run: nothing was downloaded, stopped, or changed.")
         return FirmwareUpdateResult(NOT_STARTED if plan.blockers else DRY_RUN, blockers=plan.blockers)
-    if plan.blockers:
+    short_of_space_only = bool(plan.blockers) and all(blocker.code == qidi_package.FREE_SPACE
+                                                      for blocker in plan.blockers)
+    if plan.blockers and not short_of_space_only:
         return _not_started(paths, reporter, plan, plan.blockers)
-    if input_stream is not None:
-        from .interaction import prompt_yes
-
-        if not prompt_yes(reporter=reporter, input_stream=input_stream, question="Update the firmware now?",
-                          instruction="Type Y/YES to update it, or N/NO to install Valve Oil for the current "
-                                      "firmware without updating it."):
-            reporter.line("The firmware update was not started; Valve Oil installs for the current firmware.")
-            _publish_waiting(paths, plan, ())
-            return FirmwareUpdateResult(DECLINED)
     # The run can't ask for a password, so it needs what automatic updates use. -k ignores credentials sudo cached
     # for this session, which the run won't have.
     password = PUBLIC_DEFAULT_SUDO_PASSWORD
     if run(sudo_command(["-k", "-v"]), input=password + "\n", text=True, stdout=subprocess.DEVNULL,
            stderr=subprocess.DEVNULL).returncode:
-        return _not_started(paths, reporter, plan, (Blocker.of("sudo_password"),))
+        return _not_started(paths, reporter, plan, plan.blockers + (Blocker.of("sudo_password"),))
+    if short_of_space_only:
+        qidi_package.free_up_space(paths, reporter=reporter, disk_usage=disk_usage,
+                                   sudo=lambda command: run_sudo(command, run=run, password=password, timeout=300))
+        plan = firmware_update_plan(paths, manifest=manifest, admission=admission, urlopen=urlopen,
+                                    disk_usage=disk_usage)
+        if plan.blockers:
+            return _not_started(paths, reporter, plan, plan.blockers)
     printer = plan.printer
     try:
         reporter.line(f"Downloading QIDI firmware {plan.target} from {printer.target_firmware.url}")
@@ -481,8 +493,9 @@ def start_firmware_update(*, paths, reporter, manifest, kind, environ, admission
         "state": "queued", "printer": printer.id, "from_firmware": plan.installed, "target_firmware": plan.target,
         "release": manifest.package.version, "created_at": valve_oil_status.now(), "done": [], "attempts": 0,
     }
-    if log_path(paths).is_file():
-        atomic_write_text(log_path(paths), "", mode=0o600)  # one update's log at a time
+    for log in (log_path(paths), package_log_path(paths)):
+        if log.is_file():
+            atomic_write_text(log, "", mode=0o600)  # one update's log at a time
     return _launch(paths, reporter, record, run=run, password=password, follow=follow, sleep=sleep, clock=clock,
                    plan=plan, new=True)
 
@@ -595,17 +608,20 @@ def follow_firmware_update(paths, reporter, *, request, position=None, replay=Fa
         position = max(0, log.stat().st_size - 4096) if replay and log.is_file() else (
             log.stat().st_size if log.is_file() else 0)
     stopped_since = None
+    last_line = None
     # The attempt this session started, and any the unit is running (another session may have started it first).
     attempts = {request} - {None}
     while True:
-        position = _print_new_lines(log, position, reporter)
+        position, last_line = _print_new_lines(log, position, reporter, last_line)
         record = load_record(paths)
         if record is not None and record.get("state") == "running" and record.get("current_request"):
             attempts.add(record["current_request"])
         result = load_result(paths)
         if result is not None and result.get("request") in attempts:
-            _print_new_lines(log, position, reporter)
-            return _report_result(paths, reporter, result)
+            _, last_line = _print_new_lines(log, position, reporter, last_line)
+            # The run's log ends with its result, which this session has then just printed.
+            return _report_result(paths, reporter, result, shown=bool(result.get("message"))
+                                  and last_line == result.get("message"))
         if _unit_active(run):
             stopped_since = None
         else:
@@ -640,29 +656,33 @@ def report_or_attach(*, paths, reporter, environ, input_stream=None, dry_run=Fal
     return 0 if outcome.state == SUCCEEDED else 1
 
 
-def _report_result(paths, reporter, result: dict, *, mark: bool = True) -> FirmwareUpdateResult:
+def _report_result(paths, reporter, result: dict, *, mark: bool = True, shown: bool = False) -> FirmwareUpdateResult:
+    """Say how the update ended; with `shown`, the message was just printed from its log, so only the outcome is."""
     state = result.get("state") if result.get("state") in (SUCCEEDED, FAILED, NOT_STARTED) else FAILED
     message = result.get("message") or ""
-    reporter.line(("Firmware update finished: " if state == SUCCEEDED else
-                   "Firmware update did not start: " if state == NOT_STARTED else
-                   "Firmware update failed: ") + message)
+    outcome = ("Firmware update finished" if state == SUCCEEDED else
+               "Firmware update did not start" if state == NOT_STARTED else
+               "Firmware update failed")
+    reporter.line(f"{outcome}." if shown else f"{outcome}: {message}")
     if mark and not result.get("reported"):
         _save(result_path(paths), {**result, "reported": True})
     blockers = tuple(Blocker.of(code) for code in result.get("blockers", ()) if isinstance(code, str))
     return FirmwareUpdateResult(state, message, blockers)
 
 
-def _print_new_lines(log: Path, position: int, reporter) -> int:
+def _print_new_lines(log: Path, position: int, reporter, last_line: str | None) -> tuple[int, str | None]:
+    """Print the log's complete lines from `position`; the next position, and the last line printed so far."""
     try:
         with log.open("rb") as handle:
             handle.seek(position)
             data = handle.read()
     except OSError:
-        return position
+        return position, last_line
     end = data.rfind(b"\n") + 1
     for line in data[:end].decode("utf-8", errors="replace").splitlines():
         reporter.line(line)
-    return position + end
+        last_line = line
+    return position + end, last_line
 
 
 def _not_started(paths, reporter, plan, blockers) -> FirmwareUpdateResult:
@@ -825,7 +845,9 @@ class _Run:
             _save(record_path(self.paths), self.record)
 
     def show(self, lines) -> None:
-        """Put a message on the touchscreen, lit: QIDI's app leaves a sleeping panel's backlight off when stopped."""
+        """Put a message on the touchscreen, lit: QIDI's app leaves a sleeping panel's backlight off when stopped. The
+        app is stopped, and the update starts it when it ends; an install holding it leaves it to the update."""
+        install_screen.hand_over(self.paths)
         self.draw(lines, reporter=self.reporter)
         update_screen.light(self.sudo, reporter=self.reporter)
 
@@ -1117,9 +1139,21 @@ def _check(ctx: _Run) -> None:
     if recovery is not None:
         raise _NotStarted(recovery.message, recovery.code)
     try:
-        qidi_package.check_free_space(ctx.paths, ctx.target, disk_usage=ctx.disk_usage)
+        _check_free_space(ctx)
     except qidi_package.PackageError as exc:
         raise _NotStarted(exc.message, exc.code) from exc
+
+
+def _check_free_space(ctx: _Run, *, unpacked: bool = False) -> None:
+    """Raise PackageError when the update is short of space even after removing what qidi_package.free_up_space
+    does."""
+    try:
+        qidi_package.check_free_space(ctx.paths, ctx.target, disk_usage=ctx.disk_usage, unpacked=unpacked)
+    except qidi_package.PackageError as exc:
+        if exc.code != qidi_package.FREE_SPACE:
+            raise
+        qidi_package.free_up_space(ctx.paths, sudo=ctx.sudo, reporter=ctx.reporter, disk_usage=ctx.disk_usage)
+        qidi_package.check_free_space(ctx.paths, ctx.target, disk_usage=ctx.disk_usage, unpacked=unpacked)
 
 
 def _stage(ctx: _Run):
@@ -1307,14 +1341,27 @@ def _klipper_idle_blocker(ctx: _Run) -> str | None:
 
 def _dpkg(ctx: _Run, arguments: list[str]):
     """dpkg as root, with no time limit: stopping it partway would leave the printer worse off than waiting. Another
-    program holding dpkg's lock is waited for, up to DPKG_LOCK_WAIT_SECONDS."""
+    program holding dpkg's lock is waited for, up to DPKG_LOCK_WAIT_SECONDS.
+
+    dpkg's output, mostly QIDI's package scripts, goes to PACKAGE_LOG_NAME beside the update's log; the session sees
+    where it is, and its last lines when dpkg fails."""
     deadline = ctx.clock() + DPKG_LOCK_WAIT_SECONDS
+    log = package_log_path(ctx.paths)
     while True:
         result = run_sudo(["dpkg", *arguments], run=ctx.run, password=ctx.password, stdout=subprocess.PIPE,
                           stderr=subprocess.STDOUT)
         output = result.stdout or ""
-        for line in output.splitlines():
-            ctx.reporter.line("  " + line)
+        try:
+            log.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            with log.open("a", encoding="utf-8") as handle:
+                handle.write(f"$ dpkg {' '.join(arguments)}\n{output}")
+            ctx.reporter.line(f"  QIDI's installer output is in {log}.")
+        except OSError as exc:
+            ctx.reporter.line(f"  (QIDI's installer output could not be saved to {log}: {exc})")
+        if result.returncode:
+            ctx.reporter.line(f"  dpkg exited with {result.returncode}; its last lines:")
+            for line in output.splitlines()[-PACKAGE_LOG_TAIL_LINES:]:
+                ctx.reporter.line("    " + line)
         if result.returncode and "locked by another process" in output and ctx.clock() < deadline:
             ctx.reporter.line("  Another program is using dpkg; waiting for it to finish...")
             ctx.sleep(10)
@@ -1325,7 +1372,7 @@ def _dpkg(ctx: _Run, arguments: list[str]):
 def _soc(ctx: _Run) -> None:
     staged = _stage(ctx)
     try:
-        qidi_package.check_free_space(ctx.paths, ctx.target, disk_usage=ctx.disk_usage, unpacked=True)
+        _check_free_space(ctx, unpacked=True)
     except qidi_package.PackageError as exc:
         raise InstallerError(exc.message) from exc
     # The touchscreen's own board update installs the SOC package in QIDI's update folder when it isn't the app's
@@ -1345,6 +1392,12 @@ def _soc(ctx: _Run) -> None:
             save_carried_system_ledger(ctx.paths, ctx.paths.printer_data_root / ctx.manifest.state_file, ctx.record["id"])
         except OSError as exc:
             ctx.reporter.line(f"  (The record of Valve Oil's system changes could not be kept across the update: {exc})")
+        # QIDI's package resets box.cfg; the Boxes' numbers are recorded first, so the boards step writes it again
+        # with each Box where it was.
+        try:
+            box_config.seed_record(ctx.paths)
+        except (OSError, ValueError) as exc:
+            ctx.reporter.line(f"  (The USB Boxes' numbers could not be recorded: {exc})")
     if ctx.record.get("soc_attempted"):
         # An earlier attempt stopped inside dpkg: let dpkg settle its database before installing the package again.
         _dpkg(ctx, ["--configure", "-a"])
@@ -1413,6 +1466,7 @@ def _boards(ctx: _Run) -> None:
         raise InstallerError("the boards' admission record is missing")
     ctx.show(update_screen.UPDATING)
     _find_mainboard(ctx)
+    _write_box_config(ctx)
     try:
         # Klipper isn't running: each tool reads and resets its board itself (see board_firmware).
         delivery = ctx.deliver(paths=ctx.paths, reporter=ctx.reporter, manifest=ctx.manifest, printer=ctx.printer,
@@ -1430,6 +1484,20 @@ def _boards(ctx: _Run) -> None:
         stranded = _stranded_mainboard(ctx, f"{mcu.outcome}: {mcu.detail}", outcome=mcu.outcome)
         if stranded is not None:
             raise stranded
+
+
+def _write_box_config(ctx: _Run) -> None:
+    """QIDI's package resets box.cfg, which its touchscreen app, stopped here, would fill in only once it starts again,
+    after the boards. Written now for the USB Boxes connected, the board step finds and flashes them."""
+    try:
+        count = box_config.write_for_connected(ctx.paths, by_id=str(SERIAL_BY_ID))
+    except (OSError, ValueError) as exc:
+        ctx.reporter.line(f"  (box.cfg could not be written for the USB Boxes: {exc})")
+        return
+    if count is None:
+        ctx.reporter.line("  box.cfg isn't in the layout QIDI's touchscreen app writes, so it was left as it is.")
+    elif count:
+        ctx.reporter.line(f"  box.cfg lists the {count} USB Box{'' if count == 1 else 'es'} connected.")
 
 
 def _find_mainboard(ctx: _Run) -> bool:
@@ -1520,15 +1588,17 @@ def _end_succeeded(ctx: _Run, status_run) -> int:
         notes.append(f"{name} keeps its firmware ({entry['outcome']}" + (f": {entry['detail']}" if entry["detail"]
                                                                           else "") + ").")
     if any(entry["board"].startswith("box") and entry["outcome"] == "skipped" for entry in unfinished):
-        # QIDI's package resets box.cfg, which the touchscreen app fills in again when it finds the Boxes.
-        notes.append("USB Boxes get their firmware at the next install or update check, once the touchscreen has "
-                     "found them again.")
+        notes.append("Those USB Boxes get their firmware at the next install or update check.")
     closed_loop = ctx.record.get("closed_loop") or {}
     if not _closed_loop_current(closed_loop):
         notes.append(closed_loop.get("detail", ""))
     elif closed_loop.get("outcome") == "flashed":
         notes.append(f"The closed-loop motor drivers run {closed_loop.get('target')}.")
     notes.append((ctx.record.get("calibration_result") or {}).get("summary", ""))
+    # The install's host changes that need a reboot get it here, whoever follows the update: a session may have
+    # ended, and an automatic update has none.
+    if schedule_reboot_after_firmware_update(ctx.paths, password=ctx.password, run=ctx.run):
+        notes.append("The printer restarts in a few seconds, once it is idle.")
     message = " ".join(note for note in notes if note)
     valve_oil_status.clear_pending(ctx.paths, kind=valve_oil_status.FIRMWARE)
     return _end(ctx, status_run, state=SUCCEEDED, message=message, keep=False)

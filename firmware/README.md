@@ -94,7 +94,7 @@ sudo systemctl stop klipper.service
 ### 3. Flash the stock application
 
 ```bash
-/home/qidi/klippy-env/bin/python ~/tltg-optimized-macros/scripts/flash_thr_firmware.py transfer \
+/home/qidi/klippy-env/bin/python ~/valve-oil/scripts/flash_thr_firmware.py transfer \
   --image "$RECOVERY/before/application.bin" \
   --backup-dir "$RECOVERY/before" --reset \
   --printer-idle-confirmed --confirm-write
@@ -108,9 +108,9 @@ Wait at least twelve seconds for the THR application to return, then read it bac
 
 ```bash
 sleep 12
-/home/qidi/klippy-env/bin/python ~/tltg-optimized-macros/scripts/flash_thr_firmware.py snapshot \
+/home/qidi/klippy-env/bin/python ~/valve-oil/scripts/flash_thr_firmware.py snapshot \
   --output-dir "$RECOVERY/restored" --printer-idle-confirmed
-/home/qidi/klippy-env/bin/python ~/tltg-optimized-macros/scripts/flash_thr_firmware.py verify \
+/home/qidi/klippy-env/bin/python ~/valve-oil/scripts/flash_thr_firmware.py verify \
   --image "$RECOVERY/before/application.bin" --backup-dir "$RECOVERY/restored" \
   --original-backup-dir "$RECOVERY/before"
 ```

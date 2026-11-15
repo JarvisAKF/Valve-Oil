@@ -24,7 +24,7 @@ from pathlib import Path
 
 LISTEN_HOST = "127.0.0.1"
 LISTEN_PORT = 7131
-BUNDLE = Path("/home/qidi/tltg-optimized-macros")
+BUNDLE = Path("/home/qidi/valve-oil")
 ADDONS_SH = BUNDLE / "addons.sh"
 MANIFEST = BUNDLE / "installer/package.yaml"
 HOME = Path("/home/qidi")

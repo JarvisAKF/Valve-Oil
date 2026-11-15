@@ -12,7 +12,7 @@ Read the installer's output first. It stops before writing anything when firmwar
 
 **A new install was refused because of a board,** with `This release of Valve Oil doesn't support a board on this printer yet, so nothing was installed.`: open the prefilled support issue link the installer printed above that line, and submit it. See [Boards Valve Oil doesn't support yet](install.md#boards-valve-oil-doesnt-support-yet). If it says a Box `is listed in box.cfg but is not connected`, connect that Box, or remove it in the touchscreen's Box setup, and run the installer again.
 
-**`A QIDI firmware update is in progress or did not finish; run ./install.sh to follow or finish it before anything else`:** run `~/tltg-optimized-macros/install.sh`. See [A QIDI firmware update stopped part way](#a-qidi-firmware-update-stopped-part-way).
+**`A QIDI firmware update is in progress or did not finish; run ./install.sh to follow or finish it before anything else`:** run `~/valve-oil/install.sh`. See [A QIDI firmware update stopped part way](#a-qidi-firmware-update-stopped-part-way).
 
 ## QIDI firmware updates
 
@@ -23,7 +23,7 @@ The installer, the printer warning, and the **Valve Oil** section in Fluidd and 
 | Reason | What to do |
 |---|---|
 | `a print is running or paused`, `a heater is set to a temperature`, or `Klipper didn't report whether the printer is idle` | Wait until the printer is idle, with every heater off, and Klipper is ready. |
-| `The firmware update needs <N> MiB free in /home/qidi.` or `there isn't enough free space on the printer` | Free up space in `/home/qidi`, such as large G-code files, timelapse videos, or old `tltg-optimized-macros-before-…zip` backups in `~/printer_data/`. `df -h /home/qidi` shows the free space. On the Max 4 the update needs about 2.1 GB. |
+| `The firmware update needs <N> MiB free in /home/qidi.` or `there isn't enough free space on the printer` | The update already removed old logs and QIDI's leftover download. Free up more space in `/home/qidi`, such as large G-code files, timelapse videos, or old `tltg-optimized-macros-before-…zip` backups in `~/printer_data/`. `df -h /home/qidi` shows the free space. On the Max 4 the update needs about 2.1 GB. |
 | `The firmware package could not be downloaded from this project's mirror` or `the firmware download couldn't be reached` | Check that the printer is online and can reach `github.com`. A partial download resumes next time. |
 | `The downloaded firmware package does not match its pinned size and SHA-256.` | Try again. The bad download is deleted. If it keeps happening, [report it](#reporting-a-problem). |
 | `the update needs sudo with QIDI's default password, as automatic updates do` | The `qidi` password isn't QIDI's default, `qiditech`. The update runs without a terminal and can't ask for it. Set it back to `qiditech` with `passwd` while you update, or keep the firmware you have. |
@@ -33,7 +33,7 @@ The installer, the printer warning, and the **Valve Oil** section in Fluidd and 
 
 ### A QIDI firmware update stopped part way
 
-If the update stops after it has stopped the services, the touchscreen shows `The firmware update didn't finish. Don't turn the printer off. Open Fluidd on a computer to see what to do next.`, and Fluidd shows the error `A QIDI firmware update didn't finish.` with what to do. Continue it by running `~/tltg-optimized-macros/install.sh` over SSH, or with **Update now**, once nothing prints and no heater is on. It continues from the step where it stopped. It isn't continued by itself at startup, so the printer isn't stopped at every boot.
+If the update stops after it has stopped the services, the touchscreen shows `The firmware update didn't finish. Don't turn the printer off. Open Fluidd on a computer to see what to do next.`, and Fluidd shows the error `A QIDI firmware update didn't finish.` with what to do. Continue it by running `~/valve-oil/install.sh` over SSH, or with **Update now**, once nothing prints and no heater is on. It continues from the step where it stopped. It isn't continued by itself at startup, so the printer isn't stopped at every boot.
 
 What it says, and what it left running:
 
@@ -46,11 +46,11 @@ What it says, and what it left running:
 - **`Not carried over:`** after a finished update, or **`The saved calibration could not be restored`**: the update finished, but that part of your saved calibration from before it isn't in the new `printer.cfg`. Copy what you need by hand from `config/printer.cfg` in the backup the message names, or calibrate again. Don't restore that whole backup with `./restore.sh`: it holds the old firmware's stock config files.
 - **`This release can't continue the firmware update`**: another Valve Oil release started it. The message gives the command that installs that release, which finishes it.
 
-The update's full log is `~/.cache/tltg-firmware-update/update.log`.
+The update's full log is `~/.cache/tltg-firmware-update/update.log`. What QIDI's package printed while it installed, much of it in Chinese, is in `qidi-package.log` beside it; the update shows its last lines when the package fails.
 
 ### A board flash couldn't be verified
 
-When a board write can't be verified, the board may hold part of an image. Klipper and the touchscreen stay stopped, and every other installer command refuses to run until the board is rescued. **Don't turn the printer off.** Run the command the installer printed, from `~/tltg-optimized-macros`:
+When a board write can't be verified, the board may hold part of an image. Klipper and the touchscreen stay stopped, and every other installer command refuses to run until the board is rescued. **Don't turn the printer off.** Run the command the installer printed, from `~/valve-oil`:
 
 - Mainboard: `./mainboard-firmware.sh rescue`. See [If a flash fails](../firmware/MAINBOARD_FIRMWARE.md#if-a-flash-fails).
 - USB Box: `./box-firmware.sh rescue --box N`. See [If a flash fails](../firmware/BOX_FIRMWARE.md#if-a-flash-fails).
@@ -97,19 +97,19 @@ Every install and uninstall saves a backup `.zip` of your configuration under `/
 Restore interactively over SSH:
 
 ```bash
-cd ~/tltg-optimized-macros && ./restore.sh
+cd ~/valve-oil && ./restore.sh
 ```
 
 Restore a specific backup:
 
 ```bash
-cd ~/tltg-optimized-macros && ./restore.sh --backup /home/qidi/printer_data/<backup-name>.zip
+cd ~/valve-oil && ./restore.sh --backup /home/qidi/printer_data/<backup-name>.zip
 ```
 
 If restore completed and the recovery sentinel is still present, clear it with:
 
 ```bash
-cd ~/tltg-optimized-macros && ./install.sh --clear-recovery-sentinel
+cd ~/valve-oil && ./install.sh --clear-recovery-sentinel
 ```
 
 To remove everything instead, see [Uninstall](install.md#uninstall).
@@ -196,9 +196,9 @@ It prints the installed Valve Oil version, QIDI's firmware versions for every bo
 ### Logs
 
 - **`klippy.log`:** in Fluidd, open **Configuration**, switch the file list to **logs**, and download `klippy.log`; or copy `~/printer_data/logs/klippy.log` over SSH. Attach it right after the problem, before restarting Klipper again, since each restart starts a new log. If it's too big to attach, zip it.
-- **Installer output:** copy everything the installer printed, from the command to the end. To get more detail, run it again with `--debug` added, for example `~/tltg-optimized-macros/install.sh --debug`.
+- **Installer output:** copy everything the installer printed, from the command to the end. To get more detail, run it again with `--debug` added, for example `~/valve-oil/install.sh --debug`.
 - **Automatic update output:** `journalctl -u tltg-optimized-auto-update.service --since "2 days ago"`.
-- **QIDI firmware update output:** `~/.cache/tltg-firmware-update/update.log`, and `journalctl -u tltg-firmware-update.service --since "2 days ago"`.
+- **QIDI firmware update output:** `~/.cache/tltg-firmware-update/update.log` and `qidi-package.log` beside it, and `journalctl -u tltg-firmware-update.service --since "2 days ago"`.
 - **Update now output:** `~/.cache/tltg-status/job.log`, the log **Show log** shows in Fluidd and Valve Oil UI.
 - **`moonraker.log`:** `~/printer_data/logs/moonraker.log`, for Fluidd or file upload problems.
 - **The sliced file**, for print problems: attach the `.gcode` or `.gcode.3mf`, zipped.

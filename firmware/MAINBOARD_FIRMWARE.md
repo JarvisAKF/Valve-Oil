@@ -24,7 +24,7 @@ The manifest also lists QIDI's `02.01.01.11` (`33375f0d…`), from Max 4 `01.01.
 
 Every install and update, including `--yes` installs, automatic updates, and the QIDI firmware update the installer runs, brings the mainboard to its pinned image, as `install` below does, without the `FLASH` prompt. A mainboard already on it is left alone. Restore and rescue run only from the script.
 
-Run these from the unpacked installer folder (`~/tltg-optimized-macros`) over SSH:
+Run these from the unpacked installer folder (`~/valve-oil`) over SSH:
 
 ```sh
 ./mainboard-firmware.sh status    # read-only: the mainboard's firmware
