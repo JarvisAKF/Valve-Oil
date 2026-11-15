@@ -15,7 +15,7 @@ The versions are what each board reports in Fluidd and `klippy.log`. Valve Oil's
 
 ## How boards are flashed
 
-Each board is flashed only while the printer is idle and ready, with every heater target at zero. Klipper and the touchscreen stop while it happens, about three minutes for the mainboard and about four minutes per Box, and the printer can't move or heat until they start again. **Keep the printer and every Box powered on until it finishes.** Once board work has started, closing the SSH session doesn't stop it, and Ctrl-C only prints `Board firmware work is in progress, so Ctrl-C is ignored until Klipper and the touchscreen run again. Keep the printer powered on.`
+Each board is flashed only while the printer is idle and ready, with every heater target at zero. Klipper and the touchscreen stop while it happens, about a minute for the mainboard and about a minute for the Boxes, which are flashed at the same time, and the printer can't move or heat until they start again. **Keep the printer and every Box powered on until it finishes.** Once board work has started, closing the SSH session doesn't stop it, and Ctrl-C only prints `Board firmware work is in progress, so Ctrl-C is ignored until Klipper and the touchscreen run again. Keep the printer powered on.`
 
 Before flashing, Valve Oil reads the board's bootloader and firmware and flashes only builds it recognizes. It keeps a copy of QIDI's firmware under `~/printer_data/` (`.tltg_thr_firmware_backups/`, `.tltg_mainboard_firmware_backups/`, `.tltg_box_firmware_backups/`), and reads the result back to check it matches exactly, with the bootloader unchanged. A board it can't flash safely, for example because a heater is on, keeps its firmware; the install still finishes, says why, and the next install tries again.
 
@@ -44,7 +44,7 @@ QIDI's USB Box firmware turns every Klipper shutdown of the Box, such as an emer
 
 It also lets the Box [read Anycubic, Elegoo, and Bambu Lab spool tags](qidi-box.md#spool-tags), by giving Klipper direct access to the Box's RFID readers in place of four QIDI test commands that nothing on the printer uses. QIDI's own spool tags read as before.
 
-**When it's flashed:** after the rest of each install and update. A USB Box connected after the last install is picked up by the next update check: with [automatic updates](install.md#automatic-updates) on, the check flashes it while the printer is idle; with them off, a printer warning says new firmware is waiting for it and to run the installer. A [QIDI firmware update](install.md#qidi-firmware-updates) doesn't flash Boxes itself; the next install or update check does, once the touchscreen has found them again. RS-485 Boxes have no firmware to flash.
+**When it's flashed:** after the rest of each install and update. A USB Box connected after the last install is picked up by the next update check: with [automatic updates](install.md#automatic-updates) on, the check flashes it while the printer is idle; with them off, a printer warning says new firmware is waiting for it and to run the installer. A [QIDI firmware update](install.md#qidi-firmware-updates) flashes the USB Boxes connected with the other boards. RS-485 Boxes have no firmware to flash.
 
 A Box whose bootloader or firmware isn't supported yet is left as it is, and Fluidd shows a warning for it, `Box N can't get the Valve Oil Box firmware yet.`, on every page, with a link to a prefilled [support issue](https://github.com/thelegendtubaguy/valve-oil/issues/new?template=printer-support.yml). `tltg_box_firmware_box<N>.json` in Fluidd's **Logs** is the report to attach. Update checks and automatic updates then skip that Box, without stopping Klipper, until it reports another firmware or a release supports it, and the warning goes away once the Box has the Valve Oil firmware. If a QIDI firmware update Valve Oil delivers ever changes the Box firmware version, the warning also says to update that Box from the touchscreen's firmware page.
 
@@ -53,7 +53,7 @@ A Box with this firmware reports its version as `02.03.01.21-valve-oil.1`. The i
 To check or change a Box's firmware yourself, run these over SSH from the installer folder:
 
 ```sh
-cd ~/tltg-optimized-macros
+cd ~/valve-oil
 ./box-firmware.sh status    # which firmware each Box runs
 ./box-firmware.sh install   # flash it to every USB Box (or --box N)
 ./box-firmware.sh restore   # put QIDI's stock Box firmware back
@@ -74,7 +74,7 @@ On the Max 4, the X and Y motors are closed-loop: each one's driver knows where 
 To check or change the mainboard's firmware yourself, run these over SSH from the installer folder:
 
 ```sh
-cd ~/tltg-optimized-macros
+cd ~/valve-oil
 ./mainboard-firmware.sh status    # which firmware the mainboard runs
 ./mainboard-firmware.sh install   # flash Valve Oil's firmware (QIDI's on the Plus 5)
 ./mainboard-firmware.sh restore   # put QIDI's stock mainboard firmware back

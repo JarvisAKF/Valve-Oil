@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import contextlib
 import functools
 import hashlib
 import io
 import json
+import os
+import pwd
 import shutil
 import subprocess
 import tarfile
@@ -37,10 +40,12 @@ from installer.runtime.auto_update import (
 )
 from installer.runtime.cli import main
 from installer.runtime.backup import load_backup_snapshot, snapshot_runtime_tree
+from installer.runtime.bootstrap import copy_bundle
 from installer.runtime.cli import resolve_runtime_paths
 from installer.runtime.compatibility import load_supported_upgrade_sources
 from installer.runtime.errors import ActivePrintError, PrinterStateError, UnsupportedFirmwareError
 from installer.runtime.manifest import load_manifest
+from installer.runtime.naming import BUNDLE_ROOT_NAME, LEGACY_BUNDLE_ROOT_NAME
 from installer.runtime.models import (
     InstalledState,
     ManagedTreeState,
@@ -60,6 +65,7 @@ from installer.tests.helpers import (
     homing_sync_reset_fixture_bytes,
     moonraker_urlopen,
     snapshot_tree,
+    temp_path,
 )
 
 
@@ -140,9 +146,9 @@ class SourcePatchLifecycleMatrixTests(unittest.TestCase):
         )
 
     @staticmethod
-    def _installed_bundle(printer_root: Path, prefix: str) -> Path:
+    def _installed_bundle(printer_root: Path, prefix: str, name: str = BUNDLE_ROOT_NAME) -> Path:
         """The bundle the update check runs from, in the printer user's home."""
-        bundle_root = printer_root.parent / "tltg-optimized-macros"
+        bundle_root = printer_root.parent / name
         bundle_root.mkdir()
         (bundle_root / "install.sh").write_text("#!/bin/sh\n", encoding="utf-8")
         for name in ("installer", "firmware", "scripts"):
@@ -702,14 +708,19 @@ class SourcePatchLifecycleMatrixTests(unittest.TestCase):
                     paths, {"tltg_keep_loaded_between_prints": "1"}
                 )
                 base_urlopen = self._fixture_urlopen(printer_root)
-                klipper = {"halted": True, "restarts": 0}
+                klipper = {"halted": True, "restarts": 0, "stray": False}
 
                 def urlopen(request, timeout=0):
                     url = getattr(request, "full_url", str(request))
+                    if klipper["stray"] and "/printer/info" in url:
+                        # While Klipper starts, QIDI's Moonraker can answer with a late reply to another request.
+                        klipper["stray"] = False
+                        return _JsonResponse({"result": {"eventtime": 1.0, "status": {"print_stats": {}}}})
                     if klipper["halted"]:
                         if "/machine/services/restart" in url:
                             klipper["restarts"] += 1
                             klipper["halted"] = not starts
+                            klipper["stray"] = True
                         elif "/printer/info" in url:
                             return _JsonResponse({"result": {"state": "error", "process_id": 100 + klipper["restarts"]}})
                         elif "save_variables" in url or "/printer/gcode/script" in url:
@@ -718,10 +729,14 @@ class SourcePatchLifecycleMatrixTests(unittest.TestCase):
                             return _JsonResponse({"result": {"status": {"print_stats": {}}}})
                     return base_urlopen(request, timeout=timeout)
 
-                with mock.patch(
-                    "installer.runtime.runner.restart_pending",
-                    functools.partial(process_restart.restart_pending, sleep=lambda _seconds: None),
-                ):
+                # Klipper's restarts are waited for without real sleeps.
+                def no_wait():
+                    stack = contextlib.ExitStack()
+                    for name in ("restart_pending", "restart_klipper_service"):
+                        stack.enter_context(mock.patch(f"installer.runtime.runner.{name}", functools.partial(
+                            getattr(process_restart, name), sleep=lambda _seconds: None)))
+                    return stack
+                with no_wait():
                     self._run_install_with_urlopen(paths, urlopen)
 
                 self.assertTrue((printer_root / "config/tltg_optimized_state.yaml").exists())
@@ -742,7 +757,8 @@ class SourcePatchLifecycleMatrixTests(unittest.TestCase):
                 if starts:
                     # With source already current, the install restarts the Klipper service itself.
                     klipper["halted"] = True
-                    self._run_install_with_urlopen(paths, urlopen)
+                    with no_wait():
+                        self._run_install_with_urlopen(paths, urlopen)
                     self.assertEqual(klipper["restarts"], 2)
                     self.assertFalse(paths.restart_marker_path.exists())
 
@@ -962,6 +978,20 @@ class SourcePatchLifecycleMatrixTests(unittest.TestCase):
         )
         self.assertFalse(paths.restart_marker_path.exists())
 
+    def test_the_installed_bundle_moves_from_the_earlier_folder_and_leaves_a_link(self):
+        home = temp_path("bundle-folder-")
+        legacy, installed = home / LEGACY_BUNDLE_ROOT_NAME, home / BUNDLE_ROOT_NAME
+        legacy.mkdir()
+        (legacy / "install.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+        auto_update.retire_legacy_bundle(home)
+        self.assertFalse(legacy.is_symlink(), "kept until ~/valve-oil holds the bundle")
+        copy_bundle(legacy, installed, pwd.getpwuid(os.getuid()))
+        for _ in range(2):
+            auto_update.retire_legacy_bundle(home)
+            self.assertEqual(legacy.resolve(), installed.resolve())
+            self.assertEqual((legacy / "install.sh").read_text(encoding="utf-8"), "#!/bin/sh\n")
+            self.assertEqual(sorted(path.name for path in home.iterdir()), sorted([legacy.name, installed.name]))
+
     def test_auto_update_switch_changes_only_enrollment_without_sudo(self):
         printer_root, paths, _ = self._fixture("01.01.06.03")
         env = build_env(printer_root, moonraker_url="http://moonraker.invalid/printer/objects/query?print_stats")
@@ -1152,9 +1182,9 @@ class SourcePatchLifecycleMatrixTests(unittest.TestCase):
             if getattr(request, "data", None) is not None:
                 self.fail(f"The check changed something: {url}")
             if url.endswith(".sha256"):
-                return _BytesResponse(f"{'2' * 64}  tltg-optimized-macros.tar.gz\n".encode(), url=(
+                return _BytesResponse(f"{'2' * 64}  valve-oil.tar.gz\n".encode(), url=(
                     f"https://github.com/thelegendtubaguy/valve-oil/releases/download/v{latest}/"
-                    "tltg-optimized-macros.tar.gz.sha256" if latest else url))
+                    "valve-oil.tar.gz.sha256" if latest else url))
             if "printer/objects/query" not in url:
                 self.fail(f"Unexpected URL: {url}")
             names = [urllib.parse.unquote(part.split("=")[0]) for part in urllib.parse.urlsplit(url).query.split("&")]
@@ -1263,7 +1293,8 @@ class SourcePatchLifecycleMatrixTests(unittest.TestCase):
             homing_sync_reset_fixture_bytes()
         )
 
-        bundle_root = self._installed_bundle(printer_root, "auto-update-recovery-")
+        # The update check of an install that stopped before it moved to ~/valve-oil runs from the earlier folder.
+        bundle_root = self._installed_bundle(printer_root, "auto-update-recovery-", LEGACY_BUNDLE_ROOT_NAME)
         paths = resolve_runtime_paths(
             bundle_root=bundle_root,
             environ=build_env(
@@ -1660,7 +1691,7 @@ def _release_archive() -> bytes:
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
         payload = b"#!/bin/sh\nexit 0\n"
-        member = tarfile.TarInfo("tltg-optimized-macros/install.sh")
+        member = tarfile.TarInfo(f"{BUNDLE_ROOT_NAME}/install.sh")
         member.mode = 0o755
         member.size = len(payload)
         archive.addfile(member, io.BytesIO(payload))

@@ -24,7 +24,13 @@ from installer.runtime import moonraker_speedups
 from installer.runtime.compatibility import load_supported_upgrade_sources, validate_manifest_compatibility
 from installer.runtime.manifest import load_manifest
 from installer.runtime.mirror import managed_tree_source_files
-from installer.runtime.naming import BUNDLE_NAME_PREFIX, BUNDLE_ROOT_NAME
+from installer.runtime.naming import (
+    ARCHIVE_NAME,
+    ARCHIVE_NAME_PREFIX,
+    BUNDLE_ROOT_NAME,
+    LEGACY_ARCHIVE_NAME,
+    LEGACY_BUNDLE_ROOT_NAME,
+)
 ALLOWED_FILES = [
     "LICENSE",
     "THIRD_PARTY_NOTICES.md",
@@ -38,6 +44,7 @@ ALLOWED_FILES = [
     "installer/release/addons.sh",
     "scripts/flash_thr_firmware.py",
     "scripts/thr_bootloaders.py",
+    "scripts/klipper_debug_read.py",
     "scripts/build_thr_firmware.py",
     "firmware/max4-thr-valve-oil-v1.json",
     "scripts/flash_box_firmware.py",
@@ -142,16 +149,17 @@ def main(argv: list[str] | None = None) -> int:
     traceable_archive = output_dir / traceable_name
 
     create_archive(bundle_root, stable_archive)
-    if traceable_archive != stable_archive:
-        shutil.copy2(stable_archive, traceable_archive)
-
-    write_sha256(stable_archive)
-    if traceable_archive != stable_archive:
-        write_sha256(traceable_archive)
-
-    validate_archive(stable_archive)
-    if traceable_archive != stable_archive:
-        validate_archive(traceable_archive)
+    shutil.copy2(stable_archive, traceable_archive)
+    archives = {stable_archive: BUNDLE_ROOT_NAME, traceable_archive: BUNDLE_ROOT_NAME}
+    if args.channel == "release":
+        # Installs from 26.11.12.2 and earlier update themselves from the archive's earlier name, and accept it only
+        # with their own folder at its root. The installer in it moves itself to the new folder.
+        legacy_archive = output_dir / LEGACY_ARCHIVE_NAME
+        create_archive(bundle_root, legacy_archive, root_name=LEGACY_BUNDLE_ROOT_NAME)
+        archives[legacy_archive] = LEGACY_BUNDLE_ROOT_NAME
+    for archive, root_name in archives.items():
+        write_sha256(archive)
+        validate_archive(archive, root_name=root_name)
 
     if args.smoke_test:
         subprocess.run(
@@ -159,9 +167,8 @@ def main(argv: list[str] | None = None) -> int:
             check=True,
         )
 
-    print(stable_archive)
-    if traceable_archive != stable_archive:
-        print(traceable_archive)
+    for archive in archives:
+        print(archive)
     return 0
 
 
@@ -333,22 +340,22 @@ def fetch_addon_files(manifest) -> list[tuple[object, Path]]:
 
 def bundle_names(*, channel: str, package_version: str, build_id: str | None) -> tuple[str, str]:
     if channel == "release":
-        stable = f"{BUNDLE_NAME_PREFIX}.tar.gz"
-        versioned = f"{BUNDLE_NAME_PREFIX}-{package_version}.tar.gz"
+        stable = ARCHIVE_NAME
+        versioned = f"{ARCHIVE_NAME_PREFIX}-{package_version}.tar.gz"
         return stable, versioned
     trace = build_id or git_short_sha()
-    stable = f"{BUNDLE_NAME_PREFIX}-dev.tar.gz"
-    traceable = f"{BUNDLE_NAME_PREFIX}-dev-{trace}.tar.gz"
+    stable = f"{ARCHIVE_NAME_PREFIX}-dev.tar.gz"
+    traceable = f"{ARCHIVE_NAME_PREFIX}-dev-{trace}.tar.gz"
     return stable, traceable
 
 
 
-def create_archive(bundle_root: Path, archive_path: Path) -> None:
+def create_archive(bundle_root: Path, archive_path: Path, *, root_name: str = BUNDLE_ROOT_NAME) -> None:
     if archive_path.exists():
         archive_path.unlink()
     with tarfile.open(archive_path, "w:gz") as tar:
         for file_path in sorted(item for item in bundle_root.rglob("*") if item.is_file()):
-            relative = file_path.relative_to(bundle_root.parent)
+            relative = Path(root_name) / file_path.relative_to(bundle_root)
             info = tar.gettarinfo(str(file_path), arcname=relative.as_posix())
             if not info.isreg():
                 raise ValueError(f"Only regular files are allowed in bundle archive: {relative}")
@@ -357,13 +364,13 @@ def create_archive(bundle_root: Path, archive_path: Path) -> None:
 
 
 
-def validate_archive(archive_path: Path) -> None:
+def validate_archive(archive_path: Path, *, root_name: str = BUNDLE_ROOT_NAME) -> None:
     with tarfile.open(archive_path, "r:gz") as tar:
         for member in tar.getmembers():
             if member.name.startswith("/"):
                 raise ValueError(f"Archive entry has absolute path: {member.name}")
             member_path = Path(member.name)
-            if member_path.parts[0] != BUNDLE_ROOT_NAME:
+            if member_path.parts[0] != root_name:
                 raise ValueError(f"Archive entry escapes bundle root: {member.name}")
             if any(part == ".." for part in member_path.parts):
                 raise ValueError(f"Archive entry contains ..: {member.name}")

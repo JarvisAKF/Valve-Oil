@@ -17,7 +17,7 @@ import time
 import urllib.request
 from dataclasses import dataclass, field, replace
 
-from . import board_firmware, firmware_update, valve_oil_status
+from . import board_firmware, firmware_update, qidi_package, valve_oil_status
 from .auto_update import installed_release, newer_release
 from .board_firmware import (
     CURRENT,
@@ -378,7 +378,8 @@ def apply(paths, found: Findings, *, reporter, environ, urlopen, run, start_firm
     if found.recovery_required or found.printer is None:
         return None
     plan = found.plan
-    if plan is not None and plan.needed and not plan.blockers:
+    # Short of space only: starting the update first removes old logs and leftover downloads, then checks again.
+    if plan is not None and plan.needed and all(blocker.code == qidi_package.FREE_SPACE for blocker in plan.blockers):
         start_firmware = start_firmware or firmware_update.start_firmware_update
         # The run continues on its own and reports through the status file; the check doesn't wait for it.
         result = start_firmware(paths=paths, reporter=reporter, manifest=found.manifest, kind="automatic",

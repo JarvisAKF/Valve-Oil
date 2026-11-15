@@ -14,25 +14,34 @@ Running it with `sudo` works the same: the installer switches to `qidi` and asks
 
 The installer checks which printer it's on and its firmware (see [Supported printers](../README.md#supported-printers)), the printer's state, and free space before writing anything, and makes a backup of your configuration first.
 
-Before it changes anything, it reads the bootloader and firmware of the toolhead board (THR), the mainboard, and each USB QIDI Box, without changing them, to check that this release supports them. It says `Reading the THR, mainboard, and USB Box firmware without changing it. Klipper and the touchscreen stop for a few minutes.` A new install reads every board. An update reads only the boards that aren't already on Valve Oil's firmware. A new install with a board this release doesn't support is refused; see [Boards Valve Oil doesn't support yet](#boards-valve-oil-doesnt-support-yet).
+Before it changes anything, it reads the bootloader and firmware of the toolhead board (THR), the mainboard, and each USB QIDI Box, without changing them, to check that this release supports them. It reads them all at the same time, and says `Reading the THR, mainboard, and USB Box firmware without changing it. Klipper and the touchscreen stop for under a minute.` A new install reads every board. An update reads only the boards that aren't already on Valve Oil's firmware. A new install with a board this release doesn't support is refused; see [Boards Valve Oil doesn't support yet](#boards-valve-oil-doesnt-support-yet).
+
+On a printer with an older QIDI firmware this release updates from, it updates the QIDI firmware first, without asking, and that update installs Valve Oil itself, as a `--yes` install does, without the questions below. See [QIDI firmware updates](#qidi-firmware-updates).
 
 Along the way it asks about:
 
-- **Updating the QIDI firmware**, only when the printer runs an older QIDI firmware this release updates from: `Update the firmware now?` If you answer yes, the update installs Valve Oil itself, as a `--yes` install does, without the questions below. See [QIDI firmware updates](#qidi-firmware-updates).
 - **Disable QIDI AI detection**, only while it's on: turns off QIDI's `algo_app` service. When the installer has finished its system changes, it reminds you to also turn off Spaghetti Detection and Foreign Object Detection in the touchscreen's Settings -> Printing Options, so the screen matches.
 - **QIDI Box setup**, when Box support is off or tool numbers don't match slot numbers.
 - **Restarting Klipper** to apply the changes.
 - **Automatic updates**, while they're off: `Would you like to turn on automatic updates?` See [Automatic updates](#automatic-updates).
 
+### The touchscreen at boot
+
+From the moment the printer is switched on, the touchscreen shows the Valve Oil logo instead of QIDI's. A few seconds later an oil drop falls from the logo's canister and spreads along a line below it, again and again, until QIDI's touchscreen app starts. The logo is written into the printer's boot partition, which holds the image the printer shows before Linux starts; only that image and the checksum that covers it change, and QIDI's original is saved first. On a boot partition Valve Oil doesn't recognize, the installer says `Kept QIDI's boot logo:` and why, and the printer shows QIDI's logo until the animation starts. [Uninstall](#uninstall) puts QIDI's logo back.
+
+### The touchscreen during an install
+
+From the moment an install or update reads the boards' firmware, which stops Klipper, until it ends, the touchscreen shows **Installing Valve Oil** and `Don't turn the printer off.`, and can't be used. QIDI's touchscreen app starts again when the install ends, whether it worked or not. It isn't shown for `--dry-run`, while a print is running or paused or a heater is on, or when the touchscreen app isn't running. If the installer stops partway, for example because the SSH session closed, the touchscreen app still starts again. If a board's firmware write can't be verified, the touchscreen stays off and says the install didn't finish, until you run the rescue command the installer printed. A QIDI firmware update the install starts shows its own screen from when it stops the touchscreen, and starts the touchscreen app when it ends.
+
 When an install or update changes Klipper's Python code, which is QIDI's `homing.py` and this project's own `klippy/extras/tltg_*.py` modules, it restarts the Klipper service itself once the printer is idle, without asking, and waits for Klipper to be ready again. Klipper keeps Python code it has loaded until its process ends, so the Restart button and `RESTART` reload the configuration but not that code.
 
 An install run with `--yes` and an automatic update have nobody to ask, so they always end by restarting the Klipper service once the printer is idle. If a print or a heater has started by then, they leave Klipper alone and say it was not restarted.
 
-At the end, without asking, it puts [Valve Oil's board firmware](firmware.md) on each board that doesn't have it yet: the THR, the Max 4's mainboard, and each USB Box. Klipper and the touchscreen stop while it does, about three minutes for the mainboard and about four minutes per Box. Keep the printer and every Box powered on until the installer finishes. **After the THR is flashed, run input shaper calibration before bed leveling or printing.** On the Max 4 with firmware older than `01.01.07.01`, the THR and mainboard are flashed once the printer is on `01.01.07.01`.
+At the end, without asking, it puts [Valve Oil's board firmware](firmware.md) on each board that doesn't have it yet: the THR, the Max 4's mainboard, and each USB Box. Klipper and the touchscreen stop while it does, about a minute for the mainboard and about a minute for the Boxes, which are flashed at the same time. Keep the printer and every Box powered on until the installer finishes. **After the THR is flashed, run input shaper calibration before bed leveling or printing.** On the Max 4 with firmware older than `01.01.07.01`, the THR and mainboard are flashed once the printer is on `01.01.07.01`.
 
 While Valve Oil is installed, the touchscreen no longer installs QIDI's firmware updates; Valve Oil delivers them instead. See [QIDI's own firmware updates](#qidis-own-firmware-updates).
 
-It applies the [OS optimizations](#os-optimizations) without asking. The system changes, including restarting Moonraker and the touchscreen, take a little over a minute on a first install; the installer names each one as it goes. When they need a reboot, the installer reboots the printer about 10 seconds after it finishes.
+It applies the [OS optimizations](#os-optimizations) without asking. The system changes, including restarting Moonraker and the touchscreen, take a little over a minute on a first install; the installer names each one as it goes. When they need a reboot, the installer reboots the printer about 5 seconds after it finishes.
 
 After installing, close every Fluidd tab and open Fluidd again.
 
@@ -41,7 +50,7 @@ After installing, close every Fluidd tab and open Fluidd again.
 Valve Oil only flashes board bootloader and firmware builds it recognizes. When it finds one it doesn't:
 
 - **On a new install**, nothing is installed and no board is changed. The installer names the board, for example `THR: its bootloader is not supported yet (bootloader SHA-256 …). Nothing was installed and the board was not changed.`, and prints a link to a support issue with the printer's details and the board's report already filled in: `To get it supported, open this prefilled support issue: …`. Open it and submit it. A new install is also refused when a Box listed in the touchscreen's Box setup isn't connected (connect it, or remove it in the touchscreen's Box setup), or when the boards can't be read, for example because Klipper isn't ready; run the installer again once Klipper is ready and the printer is idle.
-- **On an update** of an existing install, a THR or mainboard Valve Oil doesn't support keeps its firmware, and so does the other one of the two. Valve Oil updates everything else, doesn't update the QIDI firmware, and leaves QIDI's firmware updates to the touchscreen. A printer warning, `The THR can't get Valve Oil's firmware yet.` or `The mainboard can't get Valve Oil's firmware yet.`, links to the prefilled issue. Once a release supports the board, the next install or automatic update flashes it and switches QIDI's updates off.
+- **On an update** of an existing install, a THR or mainboard Valve Oil doesn't support keeps its firmware, and so does the other one of the two. Valve Oil updates everything else and doesn't update the QIDI firmware. QIDI's firmware updates stay switched off on the touchscreen, so a QIDI update can't move the printer to firmware Valve Oil doesn't support while the issue is open. A printer warning, `The THR can't get Valve Oil's firmware yet.` or `The mainboard can't get Valve Oil's firmware yet.`, links to the prefilled issue. Once a release supports the board, the next install or automatic update flashes it.
 - **A USB Box** Valve Oil doesn't support keeps its firmware, with the warning `Box N can't get the Valve Oil Box firmware yet.`, and the rest of the install goes ahead. See [QIDI Box firmware](firmware.md#qidi-box-firmware).
 
 An install counts as new on a printer where Valve Oil isn't installed, including one where it was uninstalled. It also counts as new where an earlier Valve Oil release was installed without automatic updates and a QIDI firmware update has since removed its configuration.
@@ -60,7 +69,7 @@ A dry run reads no board and stops nothing. When a [QIDI firmware update](#qidi-
 
 Every install and update applies these, including on printers where an earlier install skipped them. The printer has little memory and CPU to spare, and each release is tested with them on. Uninstall asks whether to undo them:
 
-- Adding `1.1.1.1` and `8.8.8.8` as fallback DNS servers.
+- Adding `1.1.1.1` and `8.8.8.8` as fallback DNS servers, on Max 4 firmware `01.01.06.03` only. From Max 4 `01.01.06.04`, and on the Plus 5, QIDI's firmware adds fallback DNS servers itself, so Valve Oil leaves DNS to it, and an update hands back DNS that an earlier install changed.
 - Pointing the printer's package sources at Debian's official servers.
 - Turning off services the printer doesn't use: `xl2tpd`, `bluetooth`, and QIDI AI detection if you choose.
 - Turning off [ADB](#adb), which gives anyone on your network a root shell on the printer without a password.
@@ -71,7 +80,7 @@ Every install and update applies these, including on printers where an earlier i
 
 When an install or update turns on zram swap, the CPU setting, the service priorities, or the storage repair, they take effect straight away, and the printer then reboots by itself, never during a print, to confirm they start at boot:
 
-- An install reboots the printer about 10 seconds after it finishes, without asking, unless a print is running or paused or a heater is on. It checks again just before rebooting.
+- An install reboots the printer about 5 seconds after it finishes, without asking, unless a print is running or paused or a heater is on. It checks again just before rebooting, and waits up to 5 minutes for a printer whose Klipper is still starting.
 - An automatic update reboots only once Klipper has been idle for 10 minutes: no print running or paused, no command running, the toolhead still, and every heater, including the Box dryers, off. Until then, each hourly check tries again.
 
 ### Zram swap
@@ -121,33 +130,32 @@ Each Valve Oil release brings the printer to one QIDI firmware, the newest it su
 | QIDI Max 4 | `01.01.07.01` | `01.01.06.03`, `01.01.06.04`, `01.01.06.05` |
 | QIDI Plus 5 | `01.01.02.01` | nothing older yet |
 
-When you install or update Valve Oil on one of the older firmware versions, the installer says what it would do and asks first:
+When you install or update Valve Oil on one of the older firmware versions, the installer updates the firmware without asking, so every printer runs the same QIDI firmware. It first says what it does:
 
 ```
 QIDI firmware 01.01.07.01 is available for this QIDI Max 4, which runs 01.01.06.05.
 Valve Oil downloads QIDI's package (265 MB) from this project's mirror, installs it, updates the board firmware that needs it (THR, Mainboard), and installs Valve Oil for firmware 01.01.07.01.
 It updates the closed-loop X/Y motor drivers first, one at a time, if they run the firmware QIDI's older package installed; otherwise they keep their firmware. The X and Y motors turn off, so the printer homes again before its next print.
 The printer can't be used while it runs, usually 10 to 30 minutes. Don't turn the printer off. It continues on its own if this session disconnects, and after a power loss it continues when the printer starts.
-Update the firmware now?
-Type Y/YES to update it, or N/NO to install Valve Oil for the current firmware without updating it.
 ```
 
-Answer **N** and Valve Oil installs for the firmware the printer has now; the firmware update stays waiting. `--yes` installs, **Update now**, and automatic updates don't ask.
+Interactive installs, `--yes` installs, **Update now**, and automatic updates all update it the same way.
 
 **Before it starts,** the update checks that no print is running or paused, every heater target is 0, the printer has enough free space (about 2.1 GB in `/home/qidi` on the Max 4), the THR and mainboard are boards Valve Oil supports, no earlier installer or board operation needs recovery, and `sudo` accepts QIDI's default password (see below). It downloads QIDI's package only from this project's mirror ([Max 4](https://github.com/thelegendtubaguy/Qidi-Max4-Defaults/releases), [Plus 5](https://github.com/thelegendtubaguy/Qidi-Plus5-Defaults/releases)) and checks it against the size and SHA-256 the release names. A download that stops part way picks up where it stopped next time. If anything fails, it says `The firmware update did not start:` and why, followed by `Nothing was changed; it is tried again at the next install or update check.`, and Valve Oil installs for the current firmware as usual. That includes a mirror that can't be reached.
+
+**When free space is short,** the update first removes files that aren't yours and that the printer doesn't need, then checks again: the system journal beyond 50 MB, apt's download cache, `~/download/online_update.zip` left by the touchscreen's online update, and rotated logs in `~/printer_data/logs`, such as `klippy.log.2026-11-08`, more than two days old. It says how much it freed. Your prints, timelapses, current logs, and QIDI's `~/update` folder are left alone. If that isn't enough, see [The firmware update didn't start](troubleshooting.md#the-firmware-update-didnt-start).
 
 **While it runs,** the printer can't be used. The update runs as its own service on the printer, so it carries on if your SSH session ends, which QIDI's package usually causes when it restarts the network. In order, it:
 
 1. Unpacks the package and checks that it's the printer's firmware.
 2. On the Max 4, when the package changes their firmware, updates the [closed-loop X/Y motor drivers](firmware.md#closed-loop-motor-drivers) with QIDI's driver firmware, one at a time, after stopping the touchscreen and Moonraker (from here the touchscreen shows the message below) and turning the X and Y motors off. A driver that isn't exactly as expected keeps its firmware, and so does the other one; a driver that still doesn't take its firmware after three tries stops the update before QIDI's package is installed.
-3. Stops the touchscreen, Klipper, and Moonraker. Fluidd can't reach the printer until Moonraker starts again. The touchscreen shows `Valve Oil is updating the printer's firmware. Don't turn the printer off.` A screen that had gone to sleep is turned on for it.
+3. Stops the touchscreen, Klipper, and Moonraker. Fluidd can't reach the printer until Moonraker starts again. The touchscreen shows Valve Oil's **Updating Firmware** screen, which says `Don't turn the printer off.` A screen that had gone to sleep is turned on for it.
 4. Saves a [backup](troubleshooting.md#restore-a-backup) of your configuration, then installs QIDI's system package. As a QIDI update from the touchscreen does, the package replaces the config folder with QIDI's stock files, keeping only `saved_variables.cfg`, `MCU_ID.cfg`, `timelapse.cfg`, `fluidd.cfg`, and `motion_accuracy_calibration.json`. Valve Oil then puts back your saved calibration: the `SAVE_CONFIG` block at the end of `printer.cfg`, with bed mesh profiles, input shaper results, PID tuning, and probe and endstop offsets, over QIDI's own values, as Klipper's `SAVE_CONFIG` would write it. A saved section the new firmware's config no longer has, or an option Valve Oil's install sets, isn't carried over; the result names each one. If QIDI's package resets `saved_variables.cfg` to its defaults, which it does when `saved_variables.cfg.bak` is missing, your saved variables are put back too. Other changes you made to the config folder, such as your own macro files or edits to `printer.cfg`, `moonraker.conf`, or `crowsnest.conf`, aren't put back; they're in that backup. Valve Oil also keeps its record of what it changed in the printer's system, which QIDI's package would delete, so a later [uninstall](#uninstall) still undoes all of it, and your choices about the OS optimizations and AI detection stay as they were.
-5. Flashes the THR and, on the Max 4, the mainboard, with the services still stopped.
+5. Writes the USB Boxes into `box.cfg` again, each with its number from before the update, then flashes the THR, the Max 4's mainboard, and each USB Box, with the services still stopped.
 6. Starts Klipper and Moonraker, installs Valve Oil for the new firmware, then starts the touchscreen.
+7. When the install's [OS optimizations](#os-optimizations) need a reboot, reboots the printer about 5 seconds after the update ends, whether or not your SSH session is still open. The install it runs doesn't restart Klipper at its end, since the reboot starts it. The touchscreen restarts Klipper a few times as it finds the boards, so the reboot waits up to 5 minutes for the printer to answer, and doesn't reboot while a print is running or paused or a heater is on.
 
 Afterwards, home the printer and run input shaper calibration before bed leveling or printing.
-
-USB Boxes aren't flashed during the update. QIDI's package resets the Box list in `box.cfg` until the touchscreen finds the Boxes again, and the next install, or the next update check with automatic updates on, flashes them.
 
 **If the power goes off** during the update, it continues by itself when the printer starts again. If three starts in a row each stop part way, it stops trying at startup and leaves the printer running. Even so, keep the printer powered on: a board that loses power while it's being flashed may not come back by itself.
 
@@ -161,7 +169,7 @@ USB Boxes aren't flashed during the update. QIDI's package resets the Box list i
 
 While Valve Oil is installed, the touchscreen doesn't install QIDI's firmware packages, so a QIDI update can't remove Valve Oil or put the printer on a firmware Valve Oil doesn't support yet. QIDI's **New SOC firmware available** pop-up and the firmware page's online update no longer appear. An update started from a USB drive, or from a `QD_Mandatory_Update.zip` file, stops at its first step with `Extract failed`, before anything on the printer changes. The touchscreen's notices for a single board and its **Update** for the boards, such as the closed-loop motor drivers, still work.
 
-This applies to the touchscreen apps Valve Oil has reviewed: Max 4 firmware `01.01.07.01` and Plus 5 firmware `01.01.02.01`. On the Max 4's older firmware, on a touchscreen app that has been replaced or changed, and on a printer whose THR or mainboard Valve Oil doesn't support yet, the touchscreen installs QIDI's updates as it does without Valve Oil. Uninstalling Valve Oil puts QIDI's touchscreen app back, and with it QIDI's updates.
+This applies to the touchscreen apps Valve Oil has reviewed: Max 4 firmware `01.01.07.01` and Plus 5 firmware `01.01.02.01`. On the Max 4's older firmware, and on a touchscreen app that has been replaced or changed, the touchscreen installs QIDI's updates as it does without Valve Oil. Uninstalling Valve Oil puts QIDI's touchscreen app back, and with it QIDI's updates.
 
 ### Automatic updates
 
@@ -175,20 +183,20 @@ A board the update check tried and couldn't bring to Valve Oil's firmware isn't 
 Turn automatic updates on or off with the **Automatic updates** switch in Fluidd's **Valve Oil** settings or on Valve Oil UI's [Updates](valve-oil-ui.md#updates) screen, by answering the installer's question, or over SSH. It needs no password and takes effect at the next check. Printers that had automatic updates on with an earlier release keep them on.
 
 ```bash
-~/tltg-optimized-macros/auto-update.sh --enable    # turn automatic updates on
-~/tltg-optimized-macros/auto-update.sh --disable   # turn them off
-~/tltg-optimized-macros/auto-update.sh --status    # whether they're on, the last check, and what's waiting
-~/tltg-optimized-macros/auto-update.sh --run       # check now; installs only with automatic updates on
+~/valve-oil/auto-update.sh --enable    # turn automatic updates on
+~/valve-oil/auto-update.sh --disable   # turn them off
+~/valve-oil/auto-update.sh --status    # whether they're on, the last check, and what's waiting
+~/valve-oil/auto-update.sh --run       # check now; installs only with automatic updates on
 ```
 
 `--enable-systemd` and `--disable-systemd`, the names earlier releases used, still work. Automatic updates use `sudo` with QIDI's default password, `qiditech`, so on a printer whose `qidi` password has been changed they fail wherever they need `sudo`, which includes installing a release and the QIDI firmware update.
 
 ## Uninstall
 
-If `~/tltg-optimized-macros/` is still on the printer:
+If `~/valve-oil/` is still on the printer (`~/tltg-optimized-macros/` with releases up to 26.11.12.2):
 
 ```bash
-~/tltg-optimized-macros/install.sh --uninstall --plain
+~/valve-oil/install.sh --uninstall --plain
 ```
 
 Or fetch the latest installer and uninstall with it:

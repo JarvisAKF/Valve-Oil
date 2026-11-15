@@ -29,7 +29,7 @@ The hourly update check also notices a USB Box that isn't on this firmware, such
 
 The manifest's `targets` pin this image for both Max 4 `01.01.07.01` and Plus 5 `01.01.02.01`; the Box is the same on both printers.
 
-Run these from the unpacked installer folder (`~/tltg-optimized-macros`) over SSH:
+Run these from the unpacked installer folder (`~/valve-oil`) over SSH:
 
 ```sh
 ./box-firmware.sh status               # read-only: each USB Box and its firmware

@@ -12,6 +12,7 @@ import shlex
 import shutil
 import stat
 import subprocess
+import time
 import unittest
 import urllib.error
 import urllib.parse
@@ -22,7 +23,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from installer.runtime import board_firmware, firmware_update, qidi_package, safety, update_screen, valve_oil_status
+from installer.runtime import board_firmware, box_config, firmware_update, install_screen, qidi_package, safety, update_screen, valve_oil_status
+from installer.runtime.host_reboot import recommend_reboot
 from installer.runtime.system_optimizations import CARRIED_LEDGER_FILE
 from installer.runtime.board_firmware import NEEDS_IMAGE, BoardAdmission, BoardStatus, admission_path
 from installer.runtime.cli import main, resolve_runtime_paths
@@ -41,6 +43,9 @@ DRIVER_PIN = ImagePin(size=len(DRIVER_IMAGE), sha256=hashlib.sha256(DRIVER_IMAGE
 TARGET = "01.01.07.01"
 SOC = f"QD_MAX4_SOC_{TARGET}_20261016_Release_NA"
 CONFIG_KEPT = ("MCU_ID.cfg", "saved_variables.cfg")
+# The box.cfg QIDI's package installs, with no Box.
+QIDI_BOX_CFG = b"# [include box1.cfg]\r\n# [include box2.cfg]\r\n# [include box3.cfg]\r\n# [include box4.cfg]"
+PACKAGE_SCRIPT_LINE = "停止旧版本服务"  # QIDI's preinst: "stopping the old version's services"
 # QIDI's mainboard image 02.01.01.11, which the mainboard manifest knows as a predecessor.
 MCU_11 = "33375f0debcb04fee18fbb65437fe6bd4082a6a6a70b2755f1de58320c56eab8"
 PATCHED_MCU = "02.01.01.12-valve-oil.1"
@@ -295,6 +300,13 @@ class Printer:
         self.by_id.mkdir()
         (self.by_id / self.usb_name(mainboard)).write_text("")
         (data / "config/MCU_ID.cfg").write_text(f"[mcu]\nserial: {self.by_id / self.usb_name(mainboard)}\n")
+        # Two USB Boxes, numbered against the order of their names, in the box.cfg of QIDI's 01.01.06 touchscreen app,
+        # which adds tool macros to the layout of later apps.
+        self.boxes = [str(self.by_id / f"usb-Klipper_QIDI_BOX_V2_1.2.1_{serial}-if00") for serial in ("B0X2", "B0X1")]
+        for box in self.boxes:
+            Path(box).write_text("")
+        (data / "config/box.cfg").write_text(box_config.monitor().generate(self.boxes) + "[gcode_macro T0]\ngcode:\n")
+        self.box_cfg_at_boards = None
         self.paths = resolve_runtime_paths(bundle_root=self.bundle, environ={
             "TLTG_OPTIMIZED_PRINTER_DATA_ROOT": str(data),
             "TLTG_OPTIMIZED_FIRMWARE_MANIFEST": str(self.update / "firmware_manifest.json"),
@@ -309,6 +321,7 @@ class Printer:
         self.thr = "stock"
         self.services = dict.fromkeys((*firmware_update.QIDI_SERVICES, firmware_update.TIMER_NAME), "active")
         self.print_state, self.heater, self.free = "standby", 0, 64 * 2 ** 30
+        self.reclaimable: dict[str, int] = {}  # what journalctl and apt-get free, by command
         self.dpkg_version = firmware
         self.events: list[tuple] = []
         self.cut = None  # (event, count): the event at which power is lost
@@ -364,8 +377,12 @@ class Printer:
                 return self.done(command, "inactive\n", rc=3)
             if action == "start" and "--no-block" in command:
                 self.event("unit")
-                with patch.dict(os.environ):
-                    firmware_update.run_firmware_update(**self.unit_seams())
+                # The unit writes its log as firmware_update.main does.
+                log = firmware_update.log_path(self.paths)
+                log.parent.mkdir(parents=True, exist_ok=True)
+                with patch.dict(os.environ), log.open("a", encoding="utf-8") as handle:
+                    reporter = create_reporter(firmware_update._Tee(handle, self.output), prefer_plain=True)
+                    firmware_update.run_firmware_update(**{**self.unit_seams(), "reporter": reporter, "log": handle})
                 return self.done(command)
             if action in ("start", "stop"):
                 self.event(action, unit, self.update_firmware())
@@ -400,17 +417,29 @@ class Printer:
                     if path.name not in CONFIG_KEPT:
                         path.unlink()
                 (config / "printer.cfg").write_text(PACKAGE_CFG)
+                (config / "box.cfg").write_bytes(QIDI_BOX_CFG)
                 (config / "saved_variables.cfg.bak").write_text(PACKAGE_VARIABLES)
                 if reset:
                     (config / "saved_variables.cfg").write_text(PACKAGE_VARIABLES)
                 self.dpkg_version = TARGET
-                return self.done(command, rc=self.dpkg_rc)
+                return self.done(command, f"{PACKAGE_SCRIPT_LINE}\nSetting up qd-max4-system ({TARGET}) ...\n",
+                                 rc=self.dpkg_rc)
             return self.done(command)
         if name == "dpkg-query":
             self.event("dpkg-query")
             return self.done(command, f"install ok installed\t{self.dpkg_version}")
         if name == "rm":
-            shutil.rmtree(command[-1])
+            if command[1] == "-f":
+                Path(command[-1]).unlink(missing_ok=True)
+            else:
+                shutil.rmtree(command[-1])
+            return self.done(command)
+        if name in ("journalctl", "apt-get"):
+            self.event(name)
+            self.free += self.reclaimable.pop(name, 0)
+            return self.done(command)
+        if name == "systemd-run":
+            self.event("systemd-run", *command[1:])
             return self.done(command)
         if "bootstrap.py" in " ".join(command):
             env = kwargs["env"]
@@ -458,6 +487,7 @@ class Printer:
         if self.paths.restart_marker_path.exists():
             raise ThrFirmwareError("Complete pending Klipper source activation before THR firmware programming.")
         self.event("deliver", self.services["klipper.service"], self.update_firmware())
+        self.box_cfg_at_boards = (self.home / "printer_data/config/box.cfg").read_text()
         outcome, self.thr = ("current" if self.thr == "patched" else "flashed"), "patched"
         return outcome
 
@@ -487,7 +517,9 @@ class Printer:
         return f"usb-Klipper_QIDI_MAIN_V2_1.0.{version.split('.')[3][:2]}_ID-if00"
 
     def resolve_usb(self, serial):
-        return "2-1.3" if serial and Path(serial).exists() and Path(serial).parent == self.by_id else None
+        if not (serial and Path(serial).exists() and Path(serial).parent == self.by_id):
+            return None
+        return f"2-1.4.{self.boxes.index(serial) + 1}" if serial in self.boxes else "2-1.3"
 
     def sleep(self, seconds):
         self.now += seconds
@@ -605,6 +637,8 @@ class FirmwareUpdateTests(unittest.TestCase):
         self.assertEqual(printer.update_firmware(), TARGET)
         self.assertEqual(printer.dpkg_version, TARGET)
         self.assertEqual((printer.thr, printer.mainboard), ("patched", PATCHED_MCU))
+        # The boards step found box.cfg written again for the USB Boxes, each with its number from before the update.
+        self.assertEqual(printer.box_cfg_at_boards, box_config.monitor().generate(printer.boxes))
         self.assertIsNone(printer.record())
         self.assertEqual(printer.services, dict.fromkeys(printer.services, "active"))
         # The system ledger was kept before QIDI's package deleted the installed state, and is gone with the update.
@@ -629,9 +663,14 @@ class FirmwareUpdateTests(unittest.TestCase):
         part = qidi_package.cache_dir(printer.paths) / (printer.printer.target_firmware.archive + ".part")
         part.parent.mkdir(parents=True)
         part.write_bytes(bytes(len(printer.archive) + 1))
-        result = printer.start()
+        # An interactive install updates without asking: no answer at all still starts it. The install holds the
+        # touchscreen app with its screen showing; the update takes it over, and the install leaves the app to it.
+        held = printer.paths.printer_data_root / install_screen.MARKER
+        held.write_text("held\n")
+        result = printer.start(input_stream=io.StringIO(""))
         self.assertEqual(result.state, firmware_update.SUCCEEDED, printer.output.getvalue())
         self.assert_updated(printer)
+        self.assertFalse(held.exists())
         self.assertFalse(printer.paths.restart_marker_path.exists())
         kinds = [event[0] for event in printer.events]
         # The boards are flashed after the SOC install and the update folder, with Klipper stopped; nothing starts or
@@ -643,6 +682,9 @@ class FirmwareUpdateTests(unittest.TestCase):
         self.assertLess(kinds.index("install"), printer.events.index(("start", "qidi-client.service", TARGET)))
         self.assertIn(("screen", "updating"), printer.events)
         self.assertEqual((printer.backlight / "brightness").read_text(), "255\n")  # the sleeping panel was lit
+        # QIDI's package scripts print to their own log, not the session's.
+        self.assertNotIn(PACKAGE_SCRIPT_LINE, printer.output.getvalue())
+        self.assertIn(PACKAGE_SCRIPT_LINE, firmware_update.package_log_path(printer.paths).read_text())
         # The board's serial number, part of its USB name, is not logged.
         self.assertNotIn("_ID-if00", printer.output.getvalue())
         unit = (printer.systemd / firmware_update.UNIT).read_text()
@@ -877,6 +919,28 @@ class FirmwareUpdateTests(unittest.TestCase):
         self.assertEqual(printer.boot(), 0, printer.output.getvalue())
         self.assert_updated(printer)
 
+    def test_an_update_short_of_space_first_removes_old_logs_and_leftover_downloads(self):
+        printer = Printer()
+        printer.free, printer.reclaimable = 2 ** 20, {"journalctl": 64 * 2 ** 30}
+        # Each file: whether it is a week old, and whether the update removes it. The operator's prints and
+        # timelapses, and logs from the last two days, stay.
+        files = {"printer_data/logs/klippy.log": (True, False), "printer_data/logs/klippy.log.2026-11-14": (False, False),
+                 "printer_data/logs/klippy.log.2026-11-08": (True, True),
+                 "printer_data/logs/tltg_box_link.log.1": (True, True), "printer_data/gcodes/part.gcode": (True, False),
+                 "printer_data/timelapse/part.mp4": (True, False), "download/online_update.zip": (True, True)}
+        week_ago = time.time() - 7 * 24 * 3600
+        for name, (old, _) in files.items():
+            path = printer.home / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(name)
+            if old:
+                os.utime(path, (week_ago, week_ago))
+        printer.start()
+        self.assert_updated(printer)
+        self.assertEqual({name: not (printer.home / name).exists() for name in files},
+                         {name: removed for name, (_, removed) in files.items()})
+        self.assertIn(("apt-get",), printer.events)
+
     def test_nothing_changes_when_the_update_cannot_start(self):
         cases = {
             "printing": lambda p: setattr(p, "print_state", "printing"),
@@ -1088,9 +1152,10 @@ class FirmwareUpdateTests(unittest.TestCase):
                     patch("installer.runtime.cli.run_install") as run_install, \
                     patch("installer.runtime.cli.deliver_board_firmware") as deliver, \
                     patch("installer.runtime.cli.repair_installer_ownership"), \
-                    patch("installer.runtime.cli.maybe_schedule_recommended_reboot"):
+                    patch("installer.runtime.cli.maybe_schedule_recommended_reboot") as session_reboot:
                 code = main(["install", "--yes", "--plain", *arguments], bundle_root=printer.bundle, environ=env,
                             stream=output)
+            self.session_rebooted = session_reboot.called
             return code, run_install.called, deliver.called, output.getvalue()
 
         # A dry run reports the whole plan and downloads, stops, and changes nothing.
@@ -1104,10 +1169,24 @@ class FirmwareUpdateTests(unittest.TestCase):
         self.assertEqual((code, installed, delivered), (0, True, True), output)
         self.assertEqual(printer.update_firmware(), "01.01.06.05")
         # With it, the installer hands the install to the firmware update and installs nothing itself.
+        boot_id = printer.home / "boot_id"
+        boot_id.write_text("boot-one\n")
+        printer.paths = replace(printer.paths, boot_id_path_override=boot_id)
+        env["TLTG_OPTIMIZED_BOOT_ID_PATH"] = str(boot_id)
+        printer.hooks["install"] = lambda: recommend_reboot(printer.paths)
         code, installed, _, output = install()
         self.assertEqual((code, installed), (0, False), output)
         self.assert_updated(printer)
-        self.assertIn("Firmware update finished", output)
+        # The session prints the update's log, which ends with the result, and then only how it ended.
+        message = firmware_update.load_result(printer.paths)["message"]
+        self.assertEqual(output.count(message), 1, output)
+        self.assertIn("Firmware update finished.", output)
+        # The update reboots for its install's host changes when it ends; the session doesn't schedule one too.
+        reboots = [event for event in printer.events if event[0] == "systemd-run" and "complete-host-reboot" in event]
+        self.assertEqual(len(reboots), 1)
+        self.assertIn("--on-active=5s", reboots[0])
+        self.assertIn("The printer restarts", message)
+        self.assertFalse(self.session_rebooted)
 
         # A session that ended while the update ran sees its result at the next install, which then starts nothing.
         printer = Printer()

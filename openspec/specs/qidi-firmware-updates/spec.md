@@ -1,8 +1,9 @@
-## Purpose
+# qidi-firmware-updates Specification
 
+## Purpose
 Keep QIDI's own firmware packages off a printer running Valve Oil, and deliver each QIDI firmware and its board firmware through a Valve Oil release that supports it.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: QIDI package updates are blocked while Valve Oil is installed
 On a printer whose THR and mainboard are admitted, a normal install or update SHALL patch a reviewed touchscreen executable so that the app cannot install a QIDI firmware package by any of its paths, independently of optional OS optimization policy. Like the other guarded host changes, the patch SHALL change only a recognized reviewed build or this package's patch of it, and SHALL keep QIDI's original for restoration. A USB Box the release does not admit SHALL NOT stop the block.
@@ -43,8 +44,13 @@ On a printer whose THR and mainboard are admitted, a normal install or update SH
 - **AND** the firmware update stays waiting, with the reason, and is tried again at the next install, or at the next update check on a printer with automatic updates on
 
 #### Scenario: The printer is not safe to update
-- **WHEN** a print is running or paused, a heater target is nonzero, free space is short, the THR or mainboard is not admitted, an earlier board or installer operation needs recovery, or sudo would need a password the detached update cannot ask for
+- **WHEN** a print is running or paused, a heater target is nonzero, free space is short after the cleanup below, the THR or mainboard is not admitted, an earlier board or installer operation needs recovery, or sudo would need a password the detached update cannot ask for
 - **THEN** the firmware update does not start, nothing changes for it, the reason is reported and recorded as waiting work, and Valve Oil is installed or updated for the current firmware
+
+#### Scenario: Free space is short
+- **WHEN** free space is all that keeps a firmware update from starting, or from continuing once it runs
+- **THEN** it first removes files that aren't the operator's and that nothing on the printer reads again: the system journal beyond 50 MB, apt's download cache, the archive the touchscreen's online update leaves in `~/download`, and rotated logs in `printer_data/logs` more than two days old
+- **AND** it leaves prints, timelapses, current logs, and QIDI's update folder alone, and checks the free space again
 
 ### Requirement: A firmware update survives its own side effects
 A firmware update SHALL run independently of the session that started it, SHALL keep its working files where QIDI's package does not delete them, and SHALL record enough to finish after an interruption.
@@ -56,13 +62,13 @@ A firmware update SHALL run independently of the session that started it, SHALL 
 
 #### Scenario: An interactive install
 - **WHEN** an interactive install finds a firmware update it can start
-- **THEN** it says which firmware it installs, which boards it flashes, that the printer can't be used and must not be powered off while it runs, and roughly how long it takes, and asks once
-- **AND** an install with `--yes` and the install an automatic update runs do not ask
+- **THEN** it says which firmware it installs, which boards it flashes, that the printer can't be used and must not be powered off while it runs, and roughly how long it takes, and starts the update without asking
+- **AND** the operator cannot decline it and install Valve Oil for the older firmware instead
 - **AND** an install with `--dry-run` reports the same plan without downloading, stopping, or changing anything
 
 #### Scenario: The touchscreen app is stopped
 - **WHEN** the update has stopped the touchscreen app
-- **THEN** the screen shows a message not to power the printer off, upright on each printer's screen, until the app starts again
+- **THEN** the screen shows a Valve Oil image saying the firmware is updating and not to power the printer off, upright on each printer's screen, until the app starts again, or the same message as text when the image can't be shown
 - **AND** a screen the app had put to sleep is lit for the message
 
 #### Scenario: Power is lost during the update
@@ -115,6 +121,10 @@ A firmware update, an install, and an automatic update SHALL bring the THR and e
 - **WHEN** a run has flashed the THR
 - **THEN** the saved input shaper calibration stays in effect and a printer warning says to run input shaper calibration, until the operator has
 
+#### Scenario: USB Boxes during a firmware update
+- **WHEN** a firmware update's board step runs after QIDI's package has reset `box.cfg`
+- **THEN** the update has written `box.cfg` for the USB Boxes connected, and the board step flashes and verifies each of them like the THR and the mainboard
+
 #### Scenario: Automatic update
 - **WHEN** an enrolled printer's automatic update finds boards that need their pinned image and the printer passes the update checks
 - **THEN** those boards are flashed unattended
@@ -148,8 +158,9 @@ A new installation SHALL read the THR, the mainboard, and every configured USB B
 
 #### Scenario: A board is not admitted on an existing install
 - **WHEN** an update runs on an existing installation with a THR or mainboard the release does not admit
-- **THEN** the installation is updated without the block on QIDI's package updates and without firmware delivery, and a printer warning names the board and the issue link
-- **AND** once a release admits the board, the next install or automatic update applies the block and delivers firmware
+- **THEN** the installation is updated without firmware delivery and without a QIDI firmware update, and a printer warning names the board and the issue link
+- **AND** QIDI's package updates are blocked on the touchscreen, as on a printer whose boards are admitted, so a QIDI update can't take the printer to firmware no release supports
+- **AND** once a release admits the board, the next install or automatic update delivers firmware
 
 ### Requirement: USB Boxes connected after install are brought up to date
 The update check SHALL notice a configured USB Box that is not on its pinned firmware without stopping any service, from the version Klipper reports for it and what the last read of that Box found. Only an enrolled check on a printer that passes the update checks MAY stop services, to read a Box it has not read at the version it reports and to flash it.

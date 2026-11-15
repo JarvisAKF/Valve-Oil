@@ -23,6 +23,11 @@
 # changes (or every PENDING_REREAD seconds, in case two quick writes looked
 # alike), so its warnings come and go without a Klipper restart.
 #
+# Also says when a USB Box connected or disconnected while the printer was
+# busy: Valve Oil's Box monitor (installer/system/tltg_box_monitor.py) then
+# leaves box.cfg and Klipper as they are until the printer is idle, and says so
+# in BOX_CHANGE_FILE, read at the same pace.
+#
 #   warnings  a list of {"id", "level", "title", "message"}, with level
 #             "warning" or "error", and "url" for a board's prefilled
 #             support issue; empty when nothing is wrong
@@ -53,6 +58,7 @@ PENDING_MAX_TEXT = 200
 FAILED_MAX_TEXT = 600
 # The firmware update's pending record (installer/runtime/firmware_update.py).
 FIRMWARE_UPDATE_RECORD = ".tltg_firmware_update_pending.json"
+BOX_CHANGE_FILE = ".tltg_box_monitor.json"
 # Records of a board operation or install that has to be recovered before an
 # update can continue (installer/runtime/safety.py).
 RECOVERY_FILES = (".tltg_optimized_recovery_required",
@@ -85,6 +91,7 @@ class PrinterWarnings:
         self.pending = {}
         self.enrolled = False
         self.run_active = False
+        self.box_change = False
 
     def _read(self, name):
         try:
@@ -244,6 +251,17 @@ class PrinterWarnings:
                         and value.get("schema") == PENDING_SCHEMA):
                     self.pending = value
         self.run_active = self._run_active(self._pending_run())
+        self.box_change = self._box_change_waiting()
+
+    def _box_change_waiting(self):
+        path = os.path.join(self.data_dir, BOX_CHANGE_FILE)
+        try:
+            with open(path, encoding="utf-8") as handle:
+                value = json.loads(handle.read(PENDING_MAX_BYTES + 1))
+        except (OSError, ValueError):
+            return False
+        return (isinstance(value, dict) and value.get("schema") == PENDING_SCHEMA
+                and isinstance(value.get("waiting"), dict))
 
     def _pending_run(self):
         run = self.pending.get("run")
@@ -363,6 +381,14 @@ class PrinterWarnings:
                 "title": "A QIDI firmware update didn't finish.",
                 "message": ("It stopped at: " + step + ". " if step else "")
                            + message,
+            })
+        if self.box_change:
+            warnings.append({
+                "id": "box_change_waiting",
+                "level": "warning",
+                "title": "A USB Box was connected or disconnected.",
+                "message": "Klipper restarts to add or remove it once no"
+                           " print is running and no heater is on.",
             })
         items = self.pending.get("pending")
         items = [item for item in items if isinstance(item, dict)] if (

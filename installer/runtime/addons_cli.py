@@ -75,7 +75,7 @@ def main(
                 except SudoError as exc:
                     raise addons.AddonError(
                         "sudo didn't accept the printer's default password. Run "
-                        f"~/tltg-optimized-macros/addons.sh {args.action} {args.addon} over SSH and enter it there."
+                        f"~/valve-oil/addons.sh {args.action} {args.addon} over SSH and enter it there."
                     ) from exc
             if args.action == "relink":
                 addons.relink_addon(args.addon, server=args.server, root=root, sudo_password=sudo_password, run=run, status=reporter.status)
@@ -119,7 +119,7 @@ def maybe_update_installed_addons(*, paths: RuntimePaths, manifest, reporter, in
     try:
         sudo_password = None if root != Path("/") else authenticate_sudo(run=run, environ=environ, reporter=reporter, input_stream=input_stream)
     except SudoError:
-        reporter.line("Warning: add-ons were not updated because sudo failed; run ~/tltg-optimized-macros/addons.sh update <id>.")
+        reporter.line("Warning: add-ons were not updated because sudo failed; run ~/valve-oil/addons.sh update <id>.")
         return
     failures = addons.update_installed_addons(
         spec=manifest.addons,
@@ -143,7 +143,7 @@ def maybe_remove_addons(*, paths: RuntimePaths, reporter, input_stream, environ:
     try:
         sudo_password = None if root != Path("/") else authenticate_sudo(run=run, environ=environ, reporter=reporter, input_stream=input_stream)
     except SudoError:
-        reporter.line("Warning: add-ons were not removed because sudo failed; run ~/tltg-optimized-macros/addons.sh remove <id> first.")
+        reporter.line("Warning: add-ons were not removed because sudo failed; run ~/valve-oil/addons.sh remove <id> first.")
         return
     for failure in addons.remove_all_addons(root=root, sudo_password=sudo_password, run=run, status=reporter.status):
         reporter.line(f"Warning: add-on not removed. {failure}")

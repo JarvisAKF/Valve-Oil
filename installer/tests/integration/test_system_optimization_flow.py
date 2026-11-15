@@ -20,6 +20,7 @@ from installer.runtime import auto_update, status_service
 from installer.runtime import remote_screen
 from installer.runtime import cpu_governor
 from installer.runtime import cpu_tuning
+from installer.runtime import box_config as box_monitor
 from installer.runtime import qidiclient_firmware_popup
 from installer.runtime import moonraker_fixes
 from installer.runtime import restart_on_exit
@@ -110,6 +111,8 @@ class SystemOptimizationFlowTests(unittest.TestCase):
         addons_server = system_root / addons_service.SERVER_FILE.lstrip("/")
         status_unit = system_root / status_service.UNIT_FILE.lstrip("/")
         status_server = system_root / status_service.SERVER_FILE.lstrip("/")
+        monitor_files = [system_root / path.lstrip("/") for path in (box_monitor.MONITOR_FILE, box_monitor.UNIT_FILE,
+                                                                     box_monitor.RULE_FILE)]
         check_service = system_root / auto_update.SERVICE_FILE.lstrip("/")
         check_timer = system_root / auto_update.TIMER_FILE.lstrip("/")
         fixes_module = system_root / moonraker_fixes.MODULE_FILE.lstrip("/")
@@ -199,6 +202,7 @@ class SystemOptimizationFlowTests(unittest.TestCase):
             status_service.UNIT,
             auto_update.TIMER_NAME,
             "qidi-client.service",
+            box_monitor.UNIT,
             "crowsnest.service",
             cpu_tuning.TUNING_UNIT,
             cpu_tuning.IRQBALANCE_UNIT,
@@ -296,6 +300,12 @@ class SystemOptimizationFlowTests(unittest.TestCase):
         self.assertIn(qidiclient_firmware_popup.OPERATION, state.system_ledger["restore_preimages"])
         self.assertEqual(qidiclient.read_bytes(), qidiclient_patched)
         self.assertEqual(qidiclient.stat().st_mode & 0o777, 0o755)
+        # Valve Oil's Box monitor takes box.cfg over from the app: the monitor it installs recognizes the patched app.
+        self.assertEqual([path.read_text(encoding="utf-8") for path in monitor_files[1:]],
+                         [box_monitor.UNIT_CONTENT, box_monitor.RULE_CONTENT])
+        installed_monitor = {}
+        exec(compile(monitor_files[0].read_text(encoding="utf-8"), "tltg_box_monitor.py", "exec"), installed_monitor)
+        self.assertTrue(installed_monitor["app_patched"](str(qidiclient)))
         filament_config = manifest.system_optimizations.fluidd_filament_config
         filament_link = printer_root / filament_config.link
         self.assertEqual(os.readlink(filament_link), filament_config.target)
@@ -601,6 +611,8 @@ class SystemOptimizationFlowTests(unittest.TestCase):
         self.assertFalse(addons_server.exists())
         self.assertFalse(status_unit.exists())
         self.assertFalse(status_server.exists())
+        self.assertFalse(any(path.exists() for path in monitor_files))
+        self.assertFalse(installed_monitor["app_patched"](str(qidiclient)))
         self.assertFalse(check_service.exists() or check_timer.exists())
         self.assertEqual(enrolled_when_timer_stopped, [False])
         self.assertFalse(fixes_module.exists())
@@ -1305,6 +1317,11 @@ class SystemOptimizationFlowTests(unittest.TestCase):
         moonraker = manifest.system_optimizations.moonraker_file_manager.file.lstrip("/")
         newer = before[moonraker] + b"\n# QIDI's newer firmware\n"
         (system_root / moonraker).write_bytes(newer)
+        # The newer firmware's dhcpcd hook writes /etc/resolv.conf with fallback servers itself.
+        hook = system_optimizations.QIDI_DNS_HOOK.lstrip("/")
+        hook_bytes = f"#!/bin/sh\necho \"# {system_optimizations.QIDI_DNS_HOOK_MARKER}\" > /etc/resolv.conf\n".encode()
+        (system_root / hook).write_bytes(hook_bytes)
+        self.assertTrue((system_root / "etc/resolv.conf").is_symlink())
         # Only that update's own install reads what it carried.
         self.assertIsNone(system_optimizations.load_carried_system_ledger(
             paths, manifest=manifest, environ={**env, FIRMWARE_UPDATE_RUN_ENV: "another-update"}, run=host_run))
@@ -1312,14 +1329,22 @@ class SystemOptimizationFlowTests(unittest.TestCase):
                     environ={**env, FIRMWARE_UPDATE_RUN_ENV: "update-1"}, run=host_run)
         updated = load_installed_state(state_path).system_ledger
         self.assertEqual(updated["policy"], installed["policy"])
-        self.assertEqual(set(updated["restore_preimages"]), set(installed["restore_preimages"]))
+        # Valve Oil gives DNS back to QIDI's hook: /etc/resolv.conf is a file again, with servers in it, and
+        # uninstall no longer restores it.
+        self.assertEqual(set(updated["restore_preimages"]), set(installed["restore_preimages"]) - {"dns"})
+        resolv = system_root / "etc/resolv.conf"
+        self.assertFalse(resolv.is_symlink())
+        self.assertIn("nameserver ", resolv.read_text(encoding="utf-8"))
+        resolvconf = "etc/resolvconf/resolv.conf.d/"
+        self.assertEqual({name: (system_root / name).read_bytes() for name in (resolvconf + "head", resolvconf + "tail")},
+                         {name: before[name] for name in (resolvconf + "head", resolvconf + "tail")})
 
         run_uninstall(paths, manifest, compatibility, PlainReporter(io.StringIO()),
                       input_stream=io.StringIO("yes\nyes\nno\n"), urlopen=moonraker_urlopen(), environ=env, run=host_run)
         # The fake host keeps its own notes on units and resolvconf runs under systemd/ and run/.
         after = {name: data for name, data in snapshot_tree(system_root).items()
                  if name in before or not name.startswith(("systemd/", "run/"))}
-        self.assertEqual(after, {**before, moonraker: newer})
+        self.assertEqual(after, {**before, moonraker: newer, hook: hook_bytes, "etc/resolv.conf": resolv.read_bytes()})
 
     def _legacy_host_context(self):
         paths, manifest, env, root = self._installed_host_context()

@@ -53,12 +53,12 @@ Fluidd's Settings page has a **Valve Oil** section, and Valve Oil UI an [Updates
 
 | Command | What it does |
 |---|---|
-| [`~/tltg-optimized-macros/install.sh`](install.md#updating) | Installs or updates Valve Oil, with the [QIDI firmware update](install.md#qidi-firmware-updates) when one is waiting, and follows, continues, or reports a firmware update already started. `--dry-run` shows what it would do; `--yes` runs without questions, and starts a waiting firmware update without asking. |
-| [`~/tltg-optimized-macros/auto-update.sh --enable`, `--disable`](install.md#automatic-updates) | Turns automatic updates on or off, without a password. The hourly update check runs either way. |
-| [`~/tltg-optimized-macros/auto-update.sh --status`](install.md#automatic-updates) | Says whether automatic updates are on, when the last check ran, and what's waiting. |
-| [`~/tltg-optimized-macros/auto-update.sh --run`](install.md#automatic-updates) | Runs the update check now. It installs only with automatic updates on. |
-| [`~/tltg-optimized-macros/box-firmware.sh status`, `install`, `restore`, `rescue`](firmware.md#qidi-box-firmware) | Shows, flashes, or restores QIDI's firmware on each USB Box. |
-| [`~/tltg-optimized-macros/mainboard-firmware.sh status`, `install`, `restore`, `rescue`](firmware.md#mainboard-closed-loop-reply-fix) | Shows, flashes, or restores QIDI's firmware on the mainboard. |
+| [`~/valve-oil/install.sh`](install.md#updating) | Installs or updates Valve Oil, with the [QIDI firmware update](install.md#qidi-firmware-updates) when one is waiting, and follows, continues, or reports a firmware update already started. `--dry-run` shows what it would do; `--yes` runs without questions, and starts a waiting firmware update without asking. |
+| [`~/valve-oil/auto-update.sh --enable`, `--disable`](install.md#automatic-updates) | Turns automatic updates on or off, without a password. The hourly update check runs either way. |
+| [`~/valve-oil/auto-update.sh --status`](install.md#automatic-updates) | Says whether automatic updates are on, when the last check ran, and what's waiting. |
+| [`~/valve-oil/auto-update.sh --run`](install.md#automatic-updates) | Runs the update check now. It installs only with automatic updates on. |
+| [`~/valve-oil/box-firmware.sh status`, `install`, `restore`, `rescue`](firmware.md#qidi-box-firmware) | Shows, flashes, or restores QIDI's firmware on each USB Box. |
+| [`~/valve-oil/mainboard-firmware.sh status`, `install`, `restore`, `rescue`](firmware.md#mainboard-closed-loop-reply-fix) | Shows, flashes, or restores QIDI's firmware on the mainboard. |
 
 See [Installing, updating, and uninstalling](install.md) for the dry run and the OS optimizations.
 
@@ -66,6 +66,6 @@ See [Installing, updating, and uninstalling](install.md) for the dry run and the
 
 | Command | What it does |
 |---|---|
-| [`~/tltg-optimized-macros/addons.sh list`](addons.md#from-ssh) | Lists the add-ons and which are installed. |
-| [`~/tltg-optimized-macros/addons.sh install <id>`, `update <id>`, `remove <id>`](addons.md#from-ssh) | Installs, updates, or removes an add-on, such as `octoeverywhere`, `obico`, or `tailscale`, as Fluidd's **Add-ons** settings do. |
-| [`~/tltg-optimized-macros/addons.sh relink obico [--server <url>]`](addons.md#changing-the-server-or-unlinking) | Unlinks Obico, optionally moves it to another Obico server, and restarts it so it can be linked again. |
+| [`~/valve-oil/addons.sh list`](addons.md#from-ssh) | Lists the add-ons and which are installed. |
+| [`~/valve-oil/addons.sh install <id>`, `update <id>`, `remove <id>`](addons.md#from-ssh) | Installs, updates, or removes an add-on, such as `octoeverywhere`, `obico`, or `tailscale`, as Fluidd's **Add-ons** settings do. |
+| [`~/valve-oil/addons.sh relink obico [--server <url>]`](addons.md#changing-the-server-or-unlinking) | Unlinks Obico, optionally moves it to another Obico server, and restarts it so it can be linked again. |

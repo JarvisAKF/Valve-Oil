@@ -232,7 +232,7 @@ def run_mainboard_firmware(
     verb = {"install": "Install the closed-loop reply fix on" if target == "patched" else "Install QIDI's firmware on",
             "restore": "Restore QIDI's stock firmware on", "rescue": "Rescue and restore QIDI's stock firmware on"}[action]
     reporter.line(WARNING)
-    reporter.line(f"{verb} the mainboard. Klipper and the touchscreen stop for about three minutes; "
+    reporter.line(f"{verb} the mainboard. Klipper and the touchscreen stop for about a minute; "
                   "the printer can't move or heat until they start again.")
     if not confirmed:
         if input_stream is None:

@@ -7,7 +7,7 @@ import traceback
 from contextlib import nullcontext
 from pathlib import Path
 
-from . import addons_cli, firmware_update, messages, safety, valve_oil_status
+from . import addons_cli, firmware_update, install_screen, messages, safety, valve_oil_status
 from .auto_update import (
     KIND_ENV,
     LOCK_HELD_ENV,
@@ -39,7 +39,7 @@ from .ownership import repair_installer_ownership
 from .reporter import create_reporter
 from .restore_helper import RestoreHelperError, run_restore_helper
 from .rollback import clear_recovery_sentinel
-from .runner import QIDI_UPDATE_BLOCK_LINES, block_qidi_package_updates, qidi_update_block, run_install
+from .runner import block_qidi_package_updates, run_install
 from .safety import ensure_no_recovery_sentinel
 from .state_file import StateValidationError
 from .system_optimizations import (
@@ -433,39 +433,43 @@ def main(
                     environ=env,
                 )
             if args.mode == "install":
-                # Every board is read before anything changes; a new install with a board this release doesn't
-                # admit stops here.
-                printer, admission = board_preflight(
-                    paths=paths, reporter=reporter, manifest=manifest, dry_run=args.dry_run,
-                    input_stream=input_stream, environ=env,
-                )
-                if not in_firmware_update:
-                    # On a firmware this release updates from, the detached firmware update does the rest of the
-                    # install; when it can't start, Valve Oil installs for the current firmware below.
-                    firmware = firmware_update.start_firmware_update(
-                        paths=paths, reporter=reporter, manifest=manifest, admission=admission,
-                        kind=env.get(KIND_ENV) or "install", environ=env, input_stream=input_stream,
-                        dry_run=args.dry_run,
+                # The touchscreen shows Valve Oil installing from the first board read, which stops Klipper and the
+                # app, until the install is done; a firmware update started here takes it over (install_screen.py).
+                with nullcontext() if args.dry_run else install_screen.held(
+                        paths=paths, reporter=reporter, environ=env, input_stream=input_stream) as hold:
+                    # Every board is read before anything changes; a new install with a board this release doesn't
+                    # admit stops here.
+                    printer, admission = board_preflight(
+                        paths=paths, reporter=reporter, manifest=manifest, dry_run=args.dry_run,
+                        input_stream=input_stream, environ=env,
                     )
-                if firmware is None or not firmware.handled:
-                    block, why = qidi_update_block(admission)
-                    reporter.line(QIDI_UPDATE_BLOCK_LINES[block].format(why))
-                    run_install(
-                        paths,
-                        manifest,
-                        reporter,
-                        dry_run=args.dry_run,
-                        input_stream=input_stream,
-                        environ=env,
-                        system_options=_system_options_from_args(args),
-                        block_qidi_updates=block,
-                    )
-                    deliver_board_firmware(
-                        paths=paths, reporter=reporter, manifest=manifest, printer=printer, admission=admission,
-                        dry_run=args.dry_run, input_stream=input_stream, environ=env,
-                    )
-                    if not args.dry_run:
-                        _settle_waiting_release(paths, manifest.package.version)
+                    if not in_firmware_update:
+                        # On a firmware this release updates from, the detached firmware update does the rest of the
+                        # install; when it can't start, Valve Oil installs for the current firmware below.
+                        firmware = firmware_update.start_firmware_update(
+                            paths=paths, reporter=reporter, manifest=manifest, admission=admission,
+                            kind=env.get(KIND_ENV) or "install", environ=env, input_stream=input_stream,
+                            dry_run=args.dry_run,
+                        )
+                    if firmware is None or not firmware.handled:
+                        if hold is not None:
+                            hold.retake()
+                        run_install(
+                            paths,
+                            manifest,
+                            reporter,
+                            dry_run=args.dry_run,
+                            input_stream=input_stream,
+                            environ=env,
+                            system_options=_system_options_from_args(args),
+                            block_qidi_updates=block_qidi_package_updates(admission),
+                        )
+                        deliver_board_firmware(
+                            paths=paths, reporter=reporter, manifest=manifest, printer=printer, admission=admission,
+                            dry_run=args.dry_run, input_stream=input_stream, environ=env,
+                        )
+                if not args.dry_run and (firmware is None or not firmware.handled):
+                    _settle_waiting_release(paths, manifest.package.version)
             else:
                 run_uninstall(
                     paths,
@@ -485,6 +489,8 @@ def main(
                 reporter.line("Host reboot dry-run: would schedule a delayed reboot after successful completion if a system change needs one.")
             elif args.reboot_host:
                 reporter.line("Host reboot dry-run: would schedule a delayed reboot after successful completion.")
+        elif firmware is not None and firmware.handled:
+            pass  # the firmware update schedules the reboot its install needs when it ends
         elif (
             not lock_inherited
             and read_host_reboot_marker(paths) is not None

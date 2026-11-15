@@ -46,10 +46,10 @@ from .postflight import verify_install_postflight
 from .process_restart import ProcessRestartError, restart_entries, restart_pending
 from .manifest import ManifestValidationError, load_manifest
 from .state_file import StateValidationError, load_installed_state
-from .naming import BUNDLE_ROOT_NAME, REPOSITORY_URL
+from .naming import ARCHIVE_NAME, BUNDLE_ROOT_NAME, LEGACY_BUNDLE_ROOT_NAME, REPOSITORY_URL
 from .sudo import run_sudo_ignore_failure as _run_sudo_ignore_failure
 
-DEFAULT_ARCHIVE_URL = f"{REPOSITORY_URL}/releases/latest/download/tltg-optimized-macros.tar.gz"
+DEFAULT_ARCHIVE_URL = f"{REPOSITORY_URL}/releases/latest/download/{ARCHIVE_NAME}"
 DEFAULT_CHECKSUM_URL = f"{DEFAULT_ARCHIVE_URL}.sha256"
 LOCK_HELD_ENV = "TLTG_OPTIMIZED_INSTALLER_LOCK_HELD"
 # Who asked for an install's QIDI firmware update, as its status-file run kind: "automatic", "update_now", or by default
@@ -216,18 +216,37 @@ def remove_auto_update_units(*, environ: dict[str, str] | None, run: RunFn, pass
 
 def settle_installed_bundle(paths: RuntimePaths, environ: dict[str, str]) -> None:
     """On the printer, make the bundle this install runs from the one the check and "update now" run, in the printer
-    user's home, when the install was started from anywhere else."""
+    user's home, when the install was started from anywhere else, and retire the folder earlier releases used."""
     if environ.get(SYSTEM_ROOT_ENV) or paths.printer_data_root != INSTALLED_BUNDLE.parent / "printer_data":
         return
-    target = paths.printer_data_root.parent / BUNDLE_ROOT_NAME
+    home = paths.printer_data_root.parent
+    target = home / BUNDLE_ROOT_NAME
     try:
-        if paths.bundle_root.resolve() == target.resolve():
-            return
-        from .bootstrap import copy_bundle
+        if paths.bundle_root.resolve() != target.resolve():
+            from .bootstrap import copy_bundle
 
-        copy_bundle(paths.bundle_root, target, pwd.getpwuid(os.getuid()))
+            copy_bundle(paths.bundle_root, target, pwd.getpwuid(os.getuid()))
+        retire_legacy_bundle(home)
     except (OSError, KeyError):
         pass
+
+
+def retire_legacy_bundle(home: Path) -> None:
+    """Put a link to ~/valve-oil in place of ~/tltg-optimized-macros, where releases up to 26.11.12.2 installed, so
+    commands and units that name the earlier folder run the installed bundle. Called once ~/valve-oil holds this
+    install's bundle; a process still running from the earlier folder, such as the install itself when it was started
+    there, then reads the same files through the link."""
+    legacy, target = home / LEGACY_BUNDLE_ROOT_NAME, home / BUNDLE_ROOT_NAME
+    if legacy.is_symlink() or not legacy.is_dir() or not (target / "install.sh").is_file():
+        return
+    retired = legacy.with_name(f".{legacy.name}.{os.getpid()}.retired")
+    os.rename(legacy, retired)
+    try:
+        os.symlink(BUNDLE_ROOT_NAME, legacy)
+    except OSError:
+        os.rename(retired, legacy)
+        raise
+    shutil.rmtree(retired, ignore_errors=True)
 
 
 # ---- the switch -------------------------------------------------------------------------------------------------------
@@ -500,7 +519,8 @@ def run_latest_installer(
     The cache is outside /tmp, which a QIDI firmware update the installer starts empties, and its run directory is gone
     before the installer starts, whether the bundle was put in place or not.
     """
-    if paths.bundle_root.name != BUNDLE_ROOT_NAME:
+    # An install that stopped before it retired the earlier folder leaves the update check running from there.
+    if paths.bundle_root.name not in (BUNDLE_ROOT_NAME, LEGACY_BUNDLE_ROOT_NAME):
         raise AutoUpdateError(messages.AUTO_UPDATE_INSTALLER_FAILED)
     stage = _new_stage(paths)
     try:

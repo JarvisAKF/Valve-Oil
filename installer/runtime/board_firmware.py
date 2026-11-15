@@ -21,6 +21,7 @@ import tempfile
 import time
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
@@ -431,7 +432,7 @@ def read_session(paths, reporter, boards, *, environ, input_stream, run, urlopen
         return not run_sudo(["systemctl", action, service], run=session_run, password=password, timeout=60).returncode
 
     reporter.line("Reading the THR, mainboard, and USB Box firmware without changing it. Klipper and the touchscreen "
-                  "stop for a few minutes.")
+                  "stop for under a minute.")
     reports = {}
     with critical_window(reporter) as reporter:
         try:
@@ -454,12 +455,17 @@ def read_session(paths, reporter, boards, *, environ, input_stream, run, urlopen
 
 
 def _read_each(paths, reporter, boards, *, states, service_action, run, roots, tools, python, resolve_usb, reports):
-    """Stop the services and read each board into `reports`; the caller starts the services again."""
+    """Stop the services and read each board into `reports`; the caller starts the services again.
+
+    The boards are read at the same time: each tool reads one board through its own port (the THR's UART, or the
+    mainboard's or a Box's USB serial device), which it opens exclusively, and only reads, so the reads take as long
+    as the slowest one instead of their sum."""
     box_session = None
     for service in reversed(SERVICES):
         if states.get(service) == "active" and not service_action("stop", service):
             raise BoardAdmissionError("Could not stop " + service + " to read the boards. No board firmware "
                                       "was changed.")
+    reads = []
     for name, kind, box in boards:
         root = roots[kind]
         root.mkdir(mode=0o700, exist_ok=True)
@@ -484,15 +490,24 @@ def _read_each(paths, reporter, boards, *, states, service_action, run, roots, t
             reports[name] = (None, None, label + " is not connected.")
             continue
         reporter.line(f"{label}: reading its bootloader and firmware...")
-        before = session / "before"
+        reads.append((name, label, session, [str(python), str(tools[kind]), "snapshot", *arguments, "--output-dir",
+                                             str(session / "before"), "--printer-idle-confirmed"]))
+
+    def snapshot(command):
         try:
-            result = run([str(python), str(tools[kind]), "snapshot", *arguments, "--output-dir", str(before),
-                          "--printer-idle-confirmed"], capture_output=True, text=True, timeout=960)
+            return run(command, capture_output=True, text=True, timeout=960)
         except (OSError, subprocess.SubprocessError) as exc:
-            reports[name] = (None, None, f"{label} could not be read ({type(exc).__name__}); see {session}.")
+            return exc
+
+    with ThreadPoolExecutor(max_workers=max(len(reads), 1)) as pool:
+        results = list(pool.map(snapshot, [command for *_, command in reads]))
+    for (name, label, session, _), result in zip(reads, results):
+        if isinstance(result, Exception):
+            reports[name] = (None, None, f"{label} could not be read ({type(result).__name__}); see {session}.")
             continue
         atomic_write_text(session / "snapshot.stdout", result.stdout or "", mode=0o600)
         atomic_write_text(session / "snapshot.stderr", result.stderr or "", mode=0o600)
+        before = session / "before"
         try:
             report = json.loads((before / "report.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):

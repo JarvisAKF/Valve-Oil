@@ -47,6 +47,8 @@ from . import cpu_tuning
 from . import service_priority
 from . import webcam_id
 from . import zram_swap
+from . import boot_screen
+from . import box_config
 from .auto_update import current_auto_update_checksum
 from .errors import InstallerError
 from .fs_atomic import atomic_delete, atomic_write_text
@@ -62,6 +64,7 @@ from .models import (
 )
 from .path_safety import ensure_runtime_path_has_no_symlink_components
 from .process_restart import server_info_url
+from .install_screen import touchscreen_held
 from .safety import FIRMWARE_UPDATE_RUN_ENV
 from .state_file import StateValidationError, load_installed_state, write_installed_state
 from .sudo import authenticate_sudo, run_sudo, run_sudo_ignore_failure, run_sudo_or_raise
@@ -135,6 +138,7 @@ SERVICE_NAMES = {
     remote_screen.UNIT: "the Printer screen service",
     addons_service.UNIT: "the add-ons service",
     status_service.UNIT: "the Valve Oil status service",
+    box_config.UNIT: "the Valve Oil Box monitor",
     auto_update.TIMER_NAME: "the update check",
     QIDICLIENT_SERVICE: "the touchscreen",
     cpu_governor.SERVICE: "the CPU governor",
@@ -156,8 +160,9 @@ STEP_LABELS = {
 }
 SERVICE_STEP_NAMES = {"algo_app.service": "QIDI AI detection"}
 # Swap comes up before the services that use memory. nginx goes next so it never serves a removed Fluidd build while
-# Moonraker comes back. The touchscreen app goes last so it reconnects to the restarted Moonraker.
-RESTART_ORDER = (zram_swap.UNIT, "nginx.service", MOONRAKER_SERVICE, KLIPPER_SERVICE, remote_screen.UNIT, addons_service.UNIT, status_service.UNIT, auto_update.TIMER_NAME, QIDICLIENT_SERVICE)
+# Moonraker comes back. The touchscreen app goes last so it reconnects to the restarted Moonraker; the Box monitor starts
+# after it is patched, and waits for the install to end anyway.
+RESTART_ORDER = (zram_swap.UNIT, "nginx.service", MOONRAKER_SERVICE, KLIPPER_SERVICE, remote_screen.UNIT, addons_service.UNIT, status_service.UNIT, auto_update.TIMER_NAME, QIDICLIENT_SERVICE, box_config.UNIT)
 MOONRAKER_READY_TIMEOUT_SECONDS = 120
 
 
@@ -445,6 +450,57 @@ GUARDED_FILE_PATCHES = {
         file=lambda spec: status_service.SERVER_FILE,
         patch=status_service.patch_server,
         restart_service=status_service.UNIT,
+        missing_message=None,
+        skip_unrecognized=True,
+        create_if_missing=True,
+    ),
+    # Played at boot only; installing it starts nothing.
+    boot_screen.UNIT_OPERATION: _GuardedFilePatch(
+        label="Valve Oil boot animation unit",
+        file=lambda spec: boot_screen.UNIT_FILE,
+        patch=boot_screen.patch_unit,
+        restart_service=None,
+        missing_message=None,
+        skip_unrecognized=True,
+        create_if_missing=True,
+        service_unit=boot_screen.UNIT,
+    ),
+    boot_screen.PLAYER_OPERATION: _GuardedFilePatch(
+        label="Valve Oil boot animation",
+        file=lambda spec: boot_screen.PLAYER_FILE,
+        patch=boot_screen.patch_player,
+        restart_service=None,
+        missing_message=None,
+        skip_unrecognized=True,
+        create_if_missing=True,
+    ),
+    # The monitor does nothing unless the touchscreen app has Valve Oil's Box detector patch. Started at install, it
+    # waits for the install to end, then records the Boxes' numbers from box.cfg.
+    box_config.MONITOR_OPERATION: _GuardedFilePatch(
+        label="Valve Oil Box monitor",
+        file=lambda spec: box_config.MONITOR_FILE,
+        patch=box_config.patch_monitor,
+        restart_service=box_config.UNIT,
+        missing_message=None,
+        skip_unrecognized=True,
+        create_if_missing=True,
+    ),
+    box_config.UNIT_OPERATION: _GuardedFilePatch(
+        label="Valve Oil Box monitor unit",
+        file=lambda spec: box_config.UNIT_FILE,
+        patch=box_config.patch_unit,
+        restart_service=box_config.UNIT,
+        missing_message=None,
+        skip_unrecognized=True,
+        create_if_missing=True,
+        service_unit=box_config.UNIT,
+    ),
+    # udev reads a changed rules file by itself.
+    box_config.RULE_OPERATION: _GuardedFilePatch(
+        label="Valve Oil Box monitor udev rule",
+        file=lambda spec: box_config.RULE_FILE,
+        patch=box_config.patch_rule,
+        restart_service=None,
         missing_message=None,
         skip_unrecognized=True,
         create_if_missing=True,
@@ -792,6 +848,14 @@ def maybe_emit_system_dry_run(
                 filament_config.TARGET_MISSING: f"  - {operation_id}: QIDI filament database missing",
             }[state])
             continue
+        if operation_id == "dns" and _system_root_allowed(paths=paths, environ=environ) and _qidi_dns_hook(
+                _system_root(environ)):
+            prior_preimages = (prior_ledger or {}).get("restore_preimages")
+            if isinstance(prior_preimages, dict) and operation_id in prior_preimages:
+                reporter.line("  - would hand DNS back to QIDI's dhcpcd hook")
+            else:
+                reporter.line("  - dns: QIDI's dhcpcd hook already adds fallback DNS servers")
+            continue
         if operation_id == ROCKCHIP_ROOT_SYNC_OPERATION:
             if not _system_root_allowed(paths=paths, environ=environ):
                 reporter.line(f"  - would evaluate {operation_id}")
@@ -1116,6 +1180,74 @@ def _retire_fluidd_bundle_patch(
         _restore_guarded_file(GUARDED_FILE_PATCHES[operation_id], preimage, paths=paths, root=root, sudo_password=sudo_password, run=run, restarts=restarts)
         atomic_delete(_journal_path(paths))
     del restore_preimages[operation_id]
+
+
+# QIDI's firmware from Max 4 01.01.06.04 (and Plus 5 01.01.02.01) installs a dhcpcd exit hook that writes
+# /etc/resolv.conf with the network's servers and public fallbacks at every lease, and its package replaces a linked
+# /etc/resolv.conf with a regular file. Valve Oil's DNS change is then redundant, so it isn't made there (_retire_dns).
+QIDI_DNS_HOOK = "/etc/dhcpcd.exit-hook"
+QIDI_DNS_HOOK_MARKER = "Automatically generated by QIDI dhcpcd-hook"
+
+
+def _qidi_dns_hook(root: Path) -> bool:
+    hook = _map_path(root, QIDI_DNS_HOOK)
+    try:
+        return hook.is_file() and not hook.is_symlink() and QIDI_DNS_HOOK_MARKER in hook.read_text(
+            encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+
+
+def _retire_dns(*, paths: RuntimePaths, spec: SystemOptimizationsSpec, root: Path, sudo_password: str | None, run,
+                restore_preimages: dict[str, Any]) -> None:
+    """Give up Valve Oil's DNS change where QIDI's hook manages DNS. /etc/resolv.conf, while it is still Valve Oil's
+    link to resolvconf's file, becomes a regular file holding the servers the printer uses now: the form QIDI's package
+    leaves it in, which its hook rewrites at the next lease. Its recorded preimage isn't put back, since that can be a
+    link QIDI's package removes or servers from an earlier network. resolvconf's head and tail go back to their
+    preimages while they still hold what Valve Oil wrote; anything else changed since is left as it is."""
+    dns = spec.dns
+    files = restore_preimages["dns"].get("files", [])
+    resolv = _map_path(root, dns.resolv_conf)
+    if resolv.is_symlink() and os.readlink(resolv) == dns.target_symlink:
+        try:
+            current = resolv.read_text(encoding="utf-8")
+        except OSError:
+            current = ""
+        if not any(line.split()[:1] == ["nameserver"] for line in current.splitlines()):
+            current = "".join(f"nameserver {server}\n" for server in dns.fallback_nameservers)
+        _replace_link_with_file(dns.resolv_conf, current, root=root, sudo_password=sudo_password, run=run)
+    head = _map_path(root, dns.resolvconf_head)
+    tail = _map_path(root, dns.resolvconf_tail)
+    desired_tail = "".join(f"nameserver {server}\n" for server in dns.fallback_nameservers)
+    for item, path, ours in ((files[1] if len(files) > 1 else None, head, ""),
+                             (files[2] if len(files) > 2 else None, tail, desired_tail)):
+        if item is None or path.is_symlink() or not path.is_file():
+            continue
+        if path.read_text(encoding="utf-8") == ours and not _file_matches_preimage(item, root=root):
+            _restore_file_preimage(item, paths=paths, root=root, sudo_password=sudo_password, run=run)
+    del restore_preimages["dns"]
+
+
+def _replace_link_with_file(path: str, content: str, *, root: Path, sudo_password: str | None, run) -> None:
+    """Replace the symlink at path with a regular file, in one rename."""
+    mapped = _map_path(root, path)
+    if _is_fake_root(root):
+        mapped.unlink(missing_ok=True)
+        mapped.write_text(content, encoding="utf-8")
+        return
+    _reject_parent_symlink_path(mapped, root=root)
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as handle:
+        handle.write(content)
+        tmp = handle.name
+    staged = f"{path}.tltg-new"
+    try:
+        run_sudo_or_raise(["install", "-m", "0644", tmp, staged], messages.SYSTEM_OPTIMIZATIONS_FAILED, run=run,
+                          password=sudo_password or "")
+        run_sudo_or_raise(["mv", "-fT", staged, path], messages.SYSTEM_OPTIMIZATIONS_FAILED, run=run,
+                          password=sudo_password or "")
+    finally:
+        Path(tmp).unlink(missing_ok=True)
+        run_sudo_ignore_failure(["rm", "-f", staged], run=run, password=sudo_password or "")
 
 
 def _outcome_file_sha256(outcome: dict[str, Any]) -> str | None:
@@ -1499,6 +1631,24 @@ def apply_system_optimizations(
                             preimage=None,
                             desired=_desired(operation_id, spec),
                             postflight={"path": guarded.file(spec)},
+                            source=source,
+                            reconciled=source in {"auto_update_child", "auto_update_reconcile"},
+                        )
+                    )
+                    applied_any = True
+                continue
+            if operation_id == "dns" and _qidi_dns_hook(root):
+                if operation_id in restore_preimages:
+                    _retire_dns(paths=paths, spec=spec, root=root, sudo_password=sudo_password, run=run,
+                                restore_preimages=restore_preimages)
+                    actions.append(
+                        _action_record(
+                            operation_id=operation_id,
+                            status="retired",
+                            started_at=started_at,
+                            preimage=None,
+                            desired=_desired(operation_id, spec),
+                            postflight={"path": spec.dns.resolv_conf},
                             source=source,
                             reconciled=source in {"auto_update_child", "auto_update_reconcile"},
                         )
@@ -3094,6 +3244,9 @@ class _ServiceRestarts:
             # A pending Klipper source activation restarts Klipper after this transaction.
             if service == KLIPPER_SERVICE and self._paths.restart_marker_path.exists():
                 continue
+            # The install holds the touchscreen app stopped and starts it when it ends (install_screen.py).
+            if service == QIDICLIENT_SERVICE and touchscreen_held():
+                continue
             if self._reporter is not None:
                 self._reporter.line(f"  Restarting {SERVICE_NAMES.get(service, service)}...")
             _restart_service(service, root=self._root, sudo_password=self._sudo_password, run=self._run, required=pending[service])
@@ -3612,6 +3765,11 @@ def _selected_operation_ids(spec: SystemOptimizationsSpec, policy: dict[str, Any
         addons_service.SERVER_OPERATION,
         status_service.UNIT_OPERATION,
         status_service.SERVER_OPERATION,
+        boot_screen.PLAYER_OPERATION,
+        boot_screen.UNIT_OPERATION,
+        box_config.MONITOR_OPERATION,
+        box_config.UNIT_OPERATION,
+        box_config.RULE_OPERATION,
         auto_update.SERVICE_OPERATION,
         auto_update.TIMER_OPERATION,
         remote_screen.NGINX_OPERATION,
@@ -3691,6 +3849,8 @@ def _desired(operation_id: str, spec: SystemOptimizationsSpec) -> dict[str, Any]
         remote_screen.UNIT_OPERATION, remote_screen.SERVER_OPERATION, remote_screen.NGINX_OPERATION,
         addons_service.UNIT_OPERATION, addons_service.SERVER_OPERATION,
         status_service.UNIT_OPERATION, status_service.SERVER_OPERATION,
+        boot_screen.PLAYER_OPERATION, boot_screen.UNIT_OPERATION,
+        box_config.MONITOR_OPERATION, box_config.UNIT_OPERATION, box_config.RULE_OPERATION,
         auto_update.SERVICE_OPERATION, auto_update.TIMER_OPERATION,
     ):
         guarded = GUARDED_FILE_PATCHES[operation_id]
@@ -4158,6 +4318,11 @@ def _host_operation_ids(spec: SystemOptimizationsSpec) -> frozenset[str]:
             addons_service.SERVER_OPERATION,
             status_service.UNIT_OPERATION,
             status_service.SERVER_OPERATION,
+            boot_screen.PLAYER_OPERATION,
+            boot_screen.UNIT_OPERATION,
+            box_config.MONITOR_OPERATION,
+            box_config.UNIT_OPERATION,
+            box_config.RULE_OPERATION,
             auto_update.SERVICE_OPERATION,
             auto_update.TIMER_OPERATION,
             remote_screen.NGINX_OPERATION,

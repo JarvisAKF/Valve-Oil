@@ -102,10 +102,12 @@ jobs:
           upload_url = os.environ['UPLOAD_URL'].split('{', 1)[0]
           token = os.environ['GITHUB_TOKEN']
           files = [
+              'dist/valve-oil.tar.gz',
+              'dist/valve-oil.tar.gz.sha256',
+              'dist/valve-oil-${{ steps.version.outputs.package_version }}.tar.gz',
+              'dist/valve-oil-${{ steps.version.outputs.package_version }}.tar.gz.sha256',
               'dist/tltg-optimized-macros.tar.gz',
               'dist/tltg-optimized-macros.tar.gz.sha256',
-              'dist/tltg-optimized-macros-${{ steps.version.outputs.package_version }}.tar.gz',
-              'dist/tltg-optimized-macros-${{ steps.version.outputs.package_version }}.tar.gz.sha256',
               'installer/release/install-latest.sh',
           ]
           for raw_path in files:

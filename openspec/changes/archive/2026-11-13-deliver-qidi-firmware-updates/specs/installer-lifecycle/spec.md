@@ -115,6 +115,77 @@ When the install's Box flow stops before any Box write, the install SHALL still 
 - **WHEN** a Box transfer or readback fails during an install or an automatic update's install after programming may have started
 - **THEN** the install fails, Klipper, the touchscreen, and the automatic-update timer stay stopped, and the output names the `rescue` command
 
+### Requirement: Reboot after host tuning
+After an install or automatic update that applies zram swap, the CPU governor, a service priority, the CPU tuning replacement, or the Rockchip repair, the installer SHALL reboot the printer without asking, never during a print or while a heater is on, and for automatic updates only once Klipper has been idle for 10 minutes.
+
+#### Scenario: An install reboots without asking
+- **WHEN** an install, interactive or `--yes`, applied any of those changes in this boot, or leaves a Rockchip reboot pending
+- **THEN** it schedules a reboot about 10 seconds later, which runs only if no print is running or paused and every heater target is 0, both when it is scheduled and when it runs
+- **AND** when the scheduled reboot runs, a printer state that can't be read, as while Klipper starts, is read again for up to 5 minutes before the reboot is left pending
+- **AND** an install during a print, or one that cannot read the printer state, reboots nothing and tells the operator to reboot
+
+#### Scenario: A QIDI firmware update reboots when it ends
+- **WHEN** the install a QIDI firmware update runs applied any of those changes or leaves a Rockchip reboot pending, and the update succeeds
+- **THEN** the update schedules the reboot about 30 seconds after it ends, whether or not a session follows it, with the same checks when it runs, and its result says the printer restarts
+- **AND** a session following the update schedules no reboot of its own
+
+#### Scenario: Automatic updates reboot once Klipper is idle
+- **WHEN** an automatic-update check finds such a reboot pending from this boot
+- **THEN** it schedules the reboot only while Klipper is ready, no print is running or paused, Klipper is running no command, every heater target, including the Box heaters, is 0, and the toolhead has not moved for 10 minutes
+- **AND** the scheduled reboot checks all of these again before it runs
+- **AND** otherwise the reboot stays pending for a later hourly check
+
+#### Scenario: The reboot lasts until the next boot
+- **WHEN** the printer has rebooted since those changes, or a later install changed none of them
+- **THEN** the installer does not reboot for them
+
+## ADDED Requirements
+
+### Requirement: The touchscreen shows the install
+While a non-dry-run install or update changes the printer, the installer SHALL hold QIDI's touchscreen app stopped and show a Valve Oil install screen on the panel, and SHALL start the app again when the install ends unless a board or installer operation needs recovery.
+
+#### Scenario: An install on an idle printer
+- **WHEN** an install or update, automatic ones included, begins its changes with the touchscreen app running and no print running or paused and no heater on
+- **THEN** a watcher that starts the app if the installer ends without doing so is armed before the app is stopped, and the panel shows the install screen
+- **AND** restarts of the app that install steps ask for wait, and the app starts once when the install ends, whether it succeeded or failed
+
+#### Scenario: A board needs recovery
+- **WHEN** the install ends, or its process ends, with a board or installer recovery record present
+- **THEN** the app stays stopped, as an unverified board write requires, and the panel says the install didn't finish
+
+#### Scenario: The touchscreen isn't taken
+- **WHEN** the run is a dry run, a print is running or paused, a heater is on, the app isn't running, or sudo or the watcher can't be started
+- **THEN** the app is left as it was and no screen is drawn
+- **AND** the install a QIDI firmware update runs leaves the app stopped under the update's own screen, holding its restarts for the update to start the app
+
+### Requirement: DNS is left to QIDI's dhcpcd hook
+Where QIDI's firmware installs its dhcpcd exit hook that writes `/etc/resolv.conf` with fallback servers, the OS optimizations SHALL NOT change the printer's DNS settings, and SHALL hand back a DNS change an earlier install made.
+
+#### Scenario: QIDI's hook is present
+- **WHEN** an install, update, or automatic-update reconciliation applies the OS optimizations on a printer with QIDI's hook
+- **THEN** it doesn't link `/etc/resolv.conf` or write resolvconf's head and tail
+
+#### Scenario: An earlier install changed DNS
+- **WHEN** it applies them with QIDI's hook present and a recorded DNS change
+- **THEN** `/etc/resolv.conf`, while still the installer's link, becomes a regular file holding the servers in use, resolvconf's head and tail return to their preimages while they still hold the installer's content, and the change is no longer recorded for uninstall
+
+#### Scenario: QIDI's hook is absent
+- **WHEN** it applies them on firmware without the hook
+- **THEN** it adds the fallback DNS servers as before, and uninstall can restore their preimages
+
+### Requirement: The installer lives in ~/valve-oil
+The installed bundle SHALL be the `valve-oil` folder in the printer user's home, and an install SHALL replace the `tltg-optimized-macros` folder earlier releases installed with a link to it.
+
+#### Scenario: A release is downloaded
+- **WHEN** `install-latest.sh` or an update check of this release installs a release
+- **THEN** the archive has `valve-oil/` at its root and unpacks to `~/valve-oil`, and the ownership repair covers that folder as it covers paths named `tltg`
+- **AND** a release also publishes `tltg-optimized-macros.tar.gz` with `tltg-optimized-macros/` at its root, which the update check of releases up to 26.11.12.1 downloads and accepts
+
+#### Scenario: An install runs where an earlier release installed
+- **WHEN** an install or update, automatic ones and the install a QIDI firmware update runs included, ends successfully on a printer with a `~/tltg-optimized-macros` folder
+- **THEN** `~/valve-oil` holds the running bundle, and `~/tltg-optimized-macros` becomes a link to it once it does, so a process still running from the earlier folder reads the same files
+- **AND** an update check running from the earlier folder, left by an install that stopped first, still installs the release
+
 ## REMOVED Requirements
 
 ### Requirement: THR firmware programming requires per-run opt-in

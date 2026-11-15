@@ -70,7 +70,7 @@ ENROLLMENT_FILE = PRINTER_DATA / ".tltg_optimized_auto_update_enrolled"
 AUTO_UPDATE_TIMER = Path("/etc/systemd/system/tltg-optimized-auto-update.timer")
 MACRO_GLOBALS = PRINTER_DATA / "config/tltg-optimized-macros/globals.cfg"
 FIRMWARE_MANIFEST = HOME / "update/firmware_manifest.json"
-BUNDLE = HOME / "tltg-optimized-macros"
+BUNDLE = HOME / "valve-oil"
 UPDATE_NOW = (sys.executable or "/usr/bin/python3", "-I", "-S", str(BUNDLE / "installer/runtime/bootstrap.py"), "update-now", "--plain")
 # installer/runtime/update_now.py: the run records this job id in the status file's run.
 JOB_ENV = "TLTG_STATUS_JOB"

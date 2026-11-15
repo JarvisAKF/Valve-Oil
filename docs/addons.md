@@ -24,15 +24,15 @@ Each Valve Oil release pins the version of every add-on it offers. When you inst
 
 ## From SSH
 
-`~/tltg-optimized-macros/addons.sh` does the same from the command line:
+`~/valve-oil/addons.sh` does the same from the command line:
 
 ```bash
-~/tltg-optimized-macros/addons.sh list
-~/tltg-optimized-macros/addons.sh install octoeverywhere
-~/tltg-optimized-macros/addons.sh update octoeverywhere
-~/tltg-optimized-macros/addons.sh remove octoeverywhere
-~/tltg-optimized-macros/addons.sh relink obico --server http://192.168.1.10:3334
-~/tltg-optimized-macros/addons.sh install tailscale
+~/valve-oil/addons.sh list
+~/valve-oil/addons.sh install octoeverywhere
+~/valve-oil/addons.sh update octoeverywhere
+~/valve-oil/addons.sh remove octoeverywhere
+~/valve-oil/addons.sh relink obico --server http://192.168.1.10:3334
+~/valve-oil/addons.sh install tailscale
 ```
 
 `relink` is for Obico. See [Changing the server or unlinking](#changing-the-server-or-unlinking).

@@ -35,6 +35,13 @@ STORE_ZERO = bytes.fromhex("5fc00139")  # strb wzr, [x2, #0x70]
 # update, this package's firmware detection, and the Box monitor read.
 EXTRACT_PROLOGUE = bytes.fromhex("fd7baaa9fd030091")  # stp x29, x30, [sp, #-0x160]!; mov x29, sp
 RETURN_FALSE = bytes.fromhex("00008052c0035fd6")  # mov w0, #0; ret
+# The app's USB Box detector returns whether the Boxes it found give another box.cfg than its own last result, and on
+# true writes box.cfg and restarts Klipper: at startup without checking for a print, and on a hotplug 4 s after the
+# last event, after saving box_count. Its last result tracks the moments a Box board reset drops the Boxes off USB, so
+# the Boxes coming back count as a change and restart Klipper for an unchanged file. Returning false leaves detection,
+# the Boxes' versions and notices, and MCU_ID.cfg to the app, and box.cfg to Valve Oil's Box monitor (box_config.py).
+DETECTOR_CHANGED = bytes.fromhex("34008052")  # mov w20, #1
+DETECTOR_UNCHANGED = bytes.fromhex("14008052")  # mov w20, #0
 CHUNK = 1 << 20
 
 
@@ -54,26 +61,33 @@ class Build:
     sites: tuple[Site, ...]
     patched_sha256: str
     blocked_sha256: str
-    # Other combinations of the sites that package versions have written; updates finish or undo them.
+    # Other combinations of the sites that package versions have written, without and with QIDI's package updates
+    # blocked; updates finish or undo them.
     other_patched_sha256: tuple[str, ...] = ()
+    other_blocked_sha256: tuple[str, ...] = ()
 
     def forms(self) -> tuple[str, ...]:
-        return (self.patched_sha256, self.blocked_sha256, *self.other_patched_sha256)
+        return (self.patched_sha256, self.blocked_sha256, *self.other_patched_sha256, *self.other_blocked_sha256)
 
     def target(self, source_sha256: str, *, block: bool | None) -> str:
         """The patched result for a file of this build: blocked or not, or with block None, blocked only when the
         file already is."""
         if block is None:
-            block = source_sha256 == self.blocked_sha256
+            block = source_sha256 in (self.blocked_sha256, *self.other_blocked_sha256)
         return self.blocked_sha256 if block else self.patched_sha256
 
+    @property
+    def detector(self) -> Site:
+        return next(site for site in self.sites if site.original == DETECTOR_CHANGED)
 
-def _sites(show_branch: int, clear_branch: int, need_update_store: int, extract: int) -> tuple[Site, ...]:
+
+def _sites(show_branch: int, clear_branch: int, need_update_store: int, extract: int, detector: int) -> tuple[Site, ...]:
     return (
         Site(show_branch, BRANCH_IF_EQUAL, BRANCH_IF_NOT_LONGER),
         Site(clear_branch, BRANCH_IF_EQUAL, BRANCH_IF_NOT_LONGER),
         Site(need_update_store, STORE_NEED_UPDATE, STORE_ZERO, blocking=True),
         Site(extract, EXTRACT_PROLOGUE, RETURN_FALSE, blocking=True),
+        Site(detector, DETECTOR_CHANGED, DETECTOR_UNCHANGED),
     )
 
 
@@ -82,18 +96,22 @@ BUILDS = {
     # QIDI Max 4 firmware 01.01.07.01
     "b5285d1a52f1180757360d0893f0f8ed619aaaa31d2d621917c0a963bc3fde4e": Build(
         size=91630352,
-        sites=_sites(0x227368, 0x227510, 0x2C7FF0, 0x31BC90),
-        patched_sha256="12d9fb74dc73db348cd53460aa3a343f7562890408cc8c32bbe37db2e34b119a",
-        blocked_sha256="b0e9a4a6ce399ea4feaa096851ae022d410caaa47eb2f60227c3483f46b5e138",
-        other_patched_sha256=("a3870f07e664f7382a22a9ee6167b5c356ed0bc836ed6e99b0f40f00c1a386c2",),
+        sites=_sites(0x227368, 0x227510, 0x2C7FF0, 0x31BC90, 0x264288),
+        patched_sha256="1985cd3e695a043eb3b6eabc45d7f800dba03339c4fb52e8dddedc4fb12eeb39",
+        blocked_sha256="5630d1f9405de7a6599c48a6758287dd25ce8bc23c80643bc3e66654daa0058a",
+        other_patched_sha256=("12d9fb74dc73db348cd53460aa3a343f7562890408cc8c32bbe37db2e34b119a",
+                              "a3870f07e664f7382a22a9ee6167b5c356ed0bc836ed6e99b0f40f00c1a386c2"),
+        other_blocked_sha256=("b0e9a4a6ce399ea4feaa096851ae022d410caaa47eb2f60227c3483f46b5e138",),
     ),
     # QIDI Plus 5 firmware 01.01.02.01
     "6c09a58a636427d468b77b78149e5305f0b1182e785a0abff67aec53b3aeb855": Build(
         size=91626272,
-        sites=_sites(0x226518, 0x2266C0, 0x2C71A0, 0x31AE40),
-        patched_sha256="7a95c573ff94455e128fe5f6d9e8b95b55ed693cb6f27d24ca7da72a5ac97802",
-        blocked_sha256="58fe6ed91c5f609777d8b4226dae59219563b1c900d0b4ad7edfe1a2fb4a8cdc",
-        other_patched_sha256=("6d39c942beca99a53ab1f3107d0e355f573f9450e3d5b66b33c83544e5b22661",),
+        sites=_sites(0x226518, 0x2266C0, 0x2C71A0, 0x31AE40, 0x263438),
+        patched_sha256="3747eacf01bd9ac65971d01f27a265d2c4bccb14a49fec2f8297f17f120c5a87",
+        blocked_sha256="8db64463e4a8eb24b233c6d8878e5948532a8fce8545575ed7d45423acc146ea",
+        other_patched_sha256=("7a95c573ff94455e128fe5f6d9e8b95b55ed693cb6f27d24ca7da72a5ac97802",
+                              "6d39c942beca99a53ab1f3107d0e355f573f9450e3d5b66b33c83544e5b22661"),
+        other_blocked_sha256=("58fe6ed91c5f609777d8b4226dae59219563b1c900d0b4ad7edfe1a2fb4a8cdc",),
     ),
 }
 

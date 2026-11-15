@@ -6,7 +6,7 @@ import urllib.request
 from dataclasses import replace
 
 from .addons_cli import maybe_update_installed_addons
-from . import klipper_cfg, messages, patches, safety
+from . import boot_logo, klipper_cfg, messages, patches, safety
 from .auto_update import (
     LOCK_HELD_ENV,
     adopt_legacy_enrollment,
@@ -43,7 +43,7 @@ from .compatibility import (
 from .config_transaction import FileChangePlan, apply_file_change_plan
 from .errors import PreviousPackageValidationError
 from .firmware import detect_supported_firmware
-from .host_reboot import arm_auto_update_reboot_followup
+from .host_reboot import arm_auto_update_reboot_followup, reboot_pending
 from .interaction import (
     maybe_restart_klipper,
     maybe_restart_pending_service_if_idle,
@@ -105,38 +105,21 @@ from .system_optimizations import (
 )
 
 
+def block_qidi_package_updates(admission) -> bool | None:
+    """The block_qidi_updates value for system optimizations, from this printer's boards (board_firmware.BoardAdmission).
 
-def qidi_update_block(admission) -> tuple[bool | None, str]:
-    """The decision on QIDI's package updates for this printer's boards (board_firmware.BoardAdmission), and why.
-
-    True blocks them: this release admits the THR and the mainboard. False removes a block: a read found a THR or
-    mainboard this release doesn't admit, so a printer Valve Oil can't flash keeps QIDI's own updates. None keeps the
-    touchscreen app as it is (blocked stays blocked; otherwise not blocked): nothing positive is known, because a board
-    wasn't read this run and has no earlier record, or there is no admission record at all. A failed read or a lost
-    record never switches QIDI's updater back on.
+    True blocks QIDI's package updates once the THR and the mainboard have been read: whether this release admits them
+    or a read found one it doesn't, which keeps a QIDI update from taking the printer to firmware no release supports
+    while the operator's support issue is open. None keeps the touchscreen app as it is (blocked stays blocked;
+    otherwise not blocked): nothing is known, because a board wasn't read this run and has no earlier record, or there
+    is no admission record at all. Nothing switches QIDI's updater back on but uninstall.
     """
     if admission is None:
-        return None, "no record of this printer's boards"
+        return None
     boards = [status for status in admission.boards if status.kind != "box"]
-    names = {"thr": "the THR", "mcu": "the mainboard"}
-    unadmitted = [names[status.board] for status in boards if status.state in UNADMITTED_STATES]
-    if unadmitted:
-        return False, "this release doesn't support " + " or ".join(unadmitted) + " yet"
-    if all(status.admitted for status in boards):
-        return True, "this release supports the THR and the mainboard"
-    return None, " and ".join(names[status.board] for status in boards if not status.admitted) + " could not be read"
-
-
-QIDI_UPDATE_BLOCK_LINES = {
-    True: "QIDI's firmware updates stay blocked on the touchscreen ({}).",
-    False: "QIDI's firmware updates are left to the touchscreen ({}).",
-    None: "QIDI's firmware updates are left as they are on the touchscreen ({}).",
-}
-
-
-def block_qidi_package_updates(admission) -> bool | None:
-    """The block_qidi_updates value for system optimizations: True, False, or None (keep), as qidi_update_block()."""
-    return qidi_update_block(admission)[0]
+    if all(status.admitted or status.state in UNADMITTED_STATES for status in boards):
+        return True
+    return None
 
 
 def _replace_legacy_system_ledger(state, ledger):
@@ -339,6 +322,7 @@ def run_install(
             block_qidi_updates=block_qidi_updates,
             run=run,
         )
+        reporter.line(boot_logo.dry_run_line())
         reporter.debug(event="install.complete", dry_run=True, backup_label=plan.backup_label)
         return result
 
@@ -612,6 +596,7 @@ def _execute_install(
             run=run,
             urlopen=urlopen,
         )
+        boot_logo.install(paths, reporter=reporter, environ=environ, input_stream=input_stream, run=run)
     except BaseException as exc:
         reporter.debug(
             event="install.failure",
@@ -674,6 +659,10 @@ def _execute_install(
         )
         if restarted:
             verify_pending_saved_variable_expectations(paths, urlopen=urlopen)
+    elif environ.get(safety.FIRMWARE_UPDATE_RUN_ENV) and reboot_pending(paths):
+        # The firmware update reboots the printer when it ends (firmware_update._end_succeeded), which starts Klipper
+        # with the installed configuration.
+        reporter.line("Klipper starts with the new configuration when the printer restarts.")
     else:
         maybe_restart_klipper(
             paths=paths,
@@ -691,7 +680,9 @@ def _execute_install(
             [item for item in result.patch_results if item.classification == patches.USER_MODIFIED]
         ),
     )
-    if environ.get(LOCK_HELD_ENV) == "1":
+    # An automatic update reboots from a check once it has recorded the release; a QIDI firmware update reboots when
+    # it ends (firmware_update._end_succeeded).
+    if environ.get(LOCK_HELD_ENV) == "1" and not environ.get(safety.FIRMWARE_UPDATE_RUN_ENV):
         arm_auto_update_reboot_followup(
             paths,
             reporter=reporter,
