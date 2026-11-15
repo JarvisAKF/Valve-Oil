@@ -213,11 +213,13 @@ def parse_manifest(raw: Any) -> Manifest:
                     firmwares=_require_unique_str_list(variant, "firmwares", non_empty=True),
                     expected=_require_str(variant, "expected"),
                     desired=_require_str(variant, "desired"),
+                    maximum=_optional_maximum(variant, patch_id),
                 )
                 for variant in _require_list_of_mapping(item, "variants")
             ),
-            maximum=_optional_patch_maximum(item, patch_id),
+            maximum=_optional_maximum(item, patch_id),
         )
+        _validate_patch_maximum(patch)
         if patch.target_tuple in seen_targets:
             raise ManifestValidationError(
                 "Duplicate patch target: " + " / ".join(patch.target_tuple)
@@ -924,20 +926,32 @@ def _require_str(mapping: dict[str, Any], key: str) -> str:
     return value
 
 
-def _optional_patch_maximum(item: dict[str, Any], patch_id: str) -> float | None:
+def _optional_maximum(item: dict[str, Any], patch_id: str) -> float | None:
     if "maximum" not in item:
         return None
     try:
-        maximum = float(_require_str(item, "maximum"))
-        desired = [float(_require_str(variant, "desired"))
-                   for variant in _require_list_of_mapping(item, "variants")]
+        return float(_require_str(item, "maximum"))
     except ValueError:
-        raise ManifestValidationError(
-            f"Patch {patch_id} maximum and desired values must be numbers.")
-    if any(value > maximum for value in desired):
-        raise ManifestValidationError(
-            f"Patch {patch_id} desired value is above its maximum.")
-    return maximum
+        raise ManifestValidationError(f"Patch {patch_id} maximum must be a number.")
+
+
+def _validate_patch_maximum(patch: PatchSpec) -> None:
+    for variant in patch.variants:
+        maximum = patch_variant_maximum(patch, variant)
+        if maximum is None:
+            continue
+        try:
+            desired = float(variant.desired)
+        except ValueError:
+            raise ManifestValidationError(
+                f"Patch {patch.id} desired value must be a number when it has a maximum.")
+        if desired > maximum:
+            raise ManifestValidationError(
+                f"Patch {patch.id} desired value is above its maximum.")
+
+
+def patch_variant_maximum(patch: PatchSpec, variant: PatchVariantSpec) -> float | None:
+    return variant.maximum if variant.maximum is not None else patch.maximum
 
 
 def _require_int(mapping: dict[str, Any], key: str) -> int:

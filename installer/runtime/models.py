@@ -76,6 +76,8 @@ class PatchVariantSpec:
     firmwares: tuple[str, ...]
     expected: str
     desired: str
+    # Replaces the patch's maximum on these firmwares.
+    maximum: float | None = None
 
 
 @dataclass(frozen=True)
