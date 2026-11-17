@@ -121,13 +121,17 @@ jobs:
           for raw_path in files:
               path = pathlib.Path(raw_path)
               url = upload_url + '?name=' + urllib.parse.quote(path.name)
-              request = urllib.request.Request(url, method='POST')
-              request.add_header('Authorization', f'Bearer {token}')
-              request.add_header('Content-Type', 'application/octet-stream')
-              # Streamed: the USB drive image is several hundred MB.
-              request.add_header('Content-Length', str(path.stat().st_size))
-              with path.open('rb') as handle, urllib.request.urlopen(request, data=handle, timeout=1800) as response:
-                  response.read()
+              # Streamed: the USB drive image is several hundred MB. The body goes
+              # into Request() before Content-Length is set: assigning
+              # request.data (as urlopen(data=...) does) drops Content-Length,
+              # urllib falls back to chunked encoding, and GitHub answers 400.
+              with path.open('rb') as handle:
+                  request = urllib.request.Request(url, data=handle, method='POST')
+                  request.add_header('Authorization', f'Bearer {token}')
+                  request.add_header('Content-Type', 'application/octet-stream')
+                  request.add_header('Content-Length', str(path.stat().st_size))
+                  with urllib.request.urlopen(request, timeout=1800) as response:
+                      response.read()
           PY
       - name: Publish release
         uses: actions/github-script@v9
