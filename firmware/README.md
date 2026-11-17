@@ -1,4 +1,4 @@
-# Max 4 THR FIFO fix
+# THR FIFO fix
 
 `max4-thr-valve-oil-v1` patches the LIS2DW FIFO-empty decision in the Max 4 THR `02.02.01.08` image shipped with QIDI firmware `01.01.07.01`. It applies the behavior of [upstream Klipper fix `6269dda56b`](https://github.com/Klipper3d/klipper/commit/6269dda56bb7c08263153b18715d08e2d964bcab), without the separate FIFO batching change.
 
@@ -41,15 +41,30 @@ The checker compares every archive payload, runs the THR's `identify` handler in
 
 ## Before flashing
 
-Generation and checking do not contact or flash a printer. The optimized-macro installer offers a default-No interactive THR firmware question and an explicit `--flash-thr-fifo` option. It checks actual application bytes and skips programming when the fix is already installed. A THR with the earlier build, `max4-thr-lis2dw-fifo-v1`, is updated from QIDI's stock THR image, taken from the THR firmware backups or `~/update`; without one, nothing is programmed. Bootloaders are admitted by exact validated build identity; an unrecognized build is captured without reset or programming, with a shareable `report.json` for a GitHub issue. Its firmware remains unchanged, previous services are restored, and configuration installation is retained. `--yes` alone and automatic updates do not authorize firmware programming.
+Generation and checking do not contact or flash a printer. The optimized-macro installer flashes this THR image on every install and update, automatic ones included, without a question, on the QIDI firmware the manifest's `targets` pin it for: Max 4 `01.01.07.01` and Plus 5 `01.01.02.01`, whose THR board and stock image are the same. On an older Max 4 firmware it waits until the installer's QIDI firmware update has installed `01.01.07.01`. `--flash-thr-fifo`, which earlier releases required, is accepted and ignored. The installer checks actual application bytes and skips programming when the fix is already installed. A THR with the earlier build, `max4-thr-lis2dw-fifo-v1`, is updated from QIDI's stock THR image, taken from the THR firmware backups or `~/update`; without one, nothing is programmed. Bootloaders are admitted by exact validated build identity. An unrecognized build refuses a new installation before any change; on an existing installation it is captured without reset or programming, with a shareable `report.json` for a GitHub issue, its firmware remains unchanged, previous services are restored, and configuration installation is retained.
 
 The package's `firmware_manifest.json` still lists QIDI's THR version. A completed touchscreen update is not proof that the patched THR was flashed. These build checks do not establish installation or physical recovery. See [THR-only operations](FLASHING.md) for the restricted tool, readback verification, and required recovery-entry validation.
 
-The ZIP is a **full QIDI update**, including the unchanged SOC and other MCU components. Installing it can replace printer configuration and remove optimized macros, as a stock update does. Keep the original archive for recovery and back up printer configuration before any firmware installation. Use the standalone image only with a verified Max 4 THR flashing and recovery procedure.
+The ZIP is a **full QIDI update**, including the unchanged SOC and other MCU components. Installing it can replace printer configuration and remove optimized macros, as a stock update does; while Valve Oil is installed, the touchscreen refuses to install it, as it does every QIDI package. Keep the original archive for recovery and back up printer configuration before any firmware installation. Use the standalone image only with a verified Max 4 THR flashing and recovery procedure.
+
+## Smart 5 build
+
+`smart5-thr-valve-oil-v1` applies the same fix to the Smart 5 THR `02.02.01.09` image shipped with QIDI firmware `01.01.02.01`, whose FIFO query moved into its own function. It changes two instruction bytes, `cbnz r6` to `cbz r6` and the scheduler store from `r6` to `r7`, which is zero for the whole function, and the version, which becomes `02.02.01.09-valve-oil.1`, in the same way as above. Its hashes are in [`smart5-thr-valve-oil-v1.json`](smart5-thr-valve-oil-v1.json); the patched THR SHA-256 is `aec05626791d939a8355e995a61f9c94c7d2524dbb7570e12552dceaf95de71b`. Build and check it from the [Smart 5 release archive](https://github.com/thelegendtubaguy/Qidi-Smart5-Defaults/releases/tag/qidi-smart5-firmware-01.01.02.01-5677f126716aaa0c084c02a787145bc911cd346badd87cca350cecaeebbc041e) with `--manifest`:
+
+```bash
+python3 scripts/build_thr_firmware.py \
+  --stock-archive S5_01.01.02.01_20261016_Release.zip \
+  --output-dir dist/smart5-thr-valve-oil-v1 --manifest smart5-thr-valve-oil-v1.json
+.venv-thr/bin/python scripts/check_thr_firmware.py \
+  --stock-archive S5_01.01.02.01_20261016_Release.zip \
+  --patched-dir dist/smart5-thr-valve-oil-v1 --manifest smart5-thr-valve-oil-v1.json
+```
+
+The installer flashes it on the Smart 5 as it flashes the Max 4 build on the Max 4 and Plus 5. To restore the Smart 5's stock THR firmware, follow the procedure below with `S5_01.01.02.01_20261016_Release.zip`, `S5_THR_02.02.01.09_20260520.bin`, the stock hash `4bcc5dea3fec9d114dc444c0b9b24933eca901adf0051932a9c5b6afca144b54`, and `--manifest smart5-thr-valve-oil-v1.json` on every `flash_thr_firmware.py` command.
 
 ## Restore the stock THR firmware from backup
 
-Use this procedure to remove the FIFO fix and put QIDI's stock THR application back. Configuration restore (`restore.sh`), uninstall, and reinstalling QIDI's `01.01.07.01` update do not restore THR firmware. Run every command on the printer over SSH as `qidi`.
+Use this procedure to remove the FIFO fix and put QIDI's stock THR application back. Configuration restore (`restore.sh`), uninstall, and Valve Oil's QIDI firmware update do not restore THR firmware. While Valve Oil is installed, the next install, or the next update check with automatic updates on, flashes the fix again. Run every command on the printer over SSH as `qidi`.
 
 Restoring erases and reprograms the THR application, the same operation as flashing the fix. Keep printer power on until verification completes. If `~/printer_data/.tltg_thr_firmware_pending.json` exists, an installer firmware operation did not finish; follow the failure procedure in [THR-only operations](FLASHING.md) instead.
 
@@ -94,7 +109,7 @@ sudo systemctl stop klipper.service
 ### 3. Flash the stock application
 
 ```bash
-/home/qidi/klippy-env/bin/python ~/tltg-optimized-macros/scripts/flash_thr_firmware.py transfer \
+/home/qidi/klippy-env/bin/python ~/valve-oil/scripts/flash_thr_firmware.py transfer \
   --image "$RECOVERY/before/application.bin" \
   --backup-dir "$RECOVERY/before" --reset \
   --printer-idle-confirmed --confirm-write
@@ -108,9 +123,9 @@ Wait at least twelve seconds for the THR application to return, then read it bac
 
 ```bash
 sleep 12
-/home/qidi/klippy-env/bin/python ~/tltg-optimized-macros/scripts/flash_thr_firmware.py snapshot \
+/home/qidi/klippy-env/bin/python ~/valve-oil/scripts/flash_thr_firmware.py snapshot \
   --output-dir "$RECOVERY/restored" --printer-idle-confirmed
-/home/qidi/klippy-env/bin/python ~/tltg-optimized-macros/scripts/flash_thr_firmware.py verify \
+/home/qidi/klippy-env/bin/python ~/valve-oil/scripts/flash_thr_firmware.py verify \
   --image "$RECOVERY/before/application.bin" --backup-dir "$RECOVERY/restored" \
   --original-backup-dir "$RECOVERY/before"
 ```

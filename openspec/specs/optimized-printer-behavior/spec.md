@@ -858,6 +858,34 @@ Optimized configuration SHALL make each USB QIDI Box heater resend an unchanged 
 - **WHEN** the extruder, bed, or chamber heater holds a steady output
 - **THEN** it is resent on Klipper's normal schedule
 
+### Requirement: QIDI Box heater switching speed
+Optimized configuration SHALL let the saved variable `vo_box_heater_pwm_cycle_time` set the PWM cycle time of every USB QIDI Box heater, from 0.01 s to 0.1 s and no longer than the heater sensor's report time, taking effect when Klipper next configures the Box MCUs. Without the variable, or with any other value, Box heaters SHALL keep QIDI's 0.1 s. Other heaters SHALL be unchanged.
+
+#### Scenario: Faster Box heater switching
+- **WHEN** `vo_box_heater_pwm_cycle_time` is `0.02` and Klipper restarts
+- **THEN** each USB Box heater is configured with a 0.02 s cycle and the bed, chamber, and extruder heaters keep theirs
+
+#### Scenario: Unusable setting
+- **WHEN** `vo_box_heater_pwm_cycle_time` is missing, not a number, or outside 0.01 s to 0.1 s
+- **THEN** Box heaters keep a 0.1 s cycle and `klippy.log` says why for a value that was set
+
+### Requirement: Turning empty QIDI Box slots' spools while the Box heats
+While a USB QIDI Box heater has a nonzero target and the saved variable `vo_box_spool_roll` is `1`, optimized configuration SHALL turn each empty slot of that Box back 25 mm at 20 mm/s every 300 s, one slot at a time, starting 300 s after the target is set. A slot is empty only when its saved vendor state is `0`, it is neither `slot_sync` nor `last_load_slot`, and its inlet sensor reads no filament. Turns SHALL NOT hold back or reorder toolhead motion.
+
+#### Scenario: Box heat on during a print
+- **WHEN** a print runs from a Box slot with that Box's heater target set, and other slots of the Box hold spools with no filament fed
+- **THEN** each of those slots turns its spool every 300 s, scheduled on the slot motor's own motion queue after every step Klipper has already generated, and the print does not pause or slow
+- **AND** slots with filament at the inlet, parked at the hub, or loaded do not move
+
+#### Scenario: Turning switched off or not due
+- **WHEN** `vo_box_spool_roll` is missing or `0`, the Box heater target is 0, the print is paused, a vendor Box task or tool change is running, or vendor drying runs on the Box
+- **THEN** no slot of that Box starts a turn
+
+#### Scenario: The motor after a turn
+- **WHEN** a turn has run
+- **THEN** the slot motor is handed back to the vendor Box code, disabled again if it was disabled
+- **AND** a motor the vendor Box code took during the turn stays enabled and gets its vendor kinematics back once the vendor's moves have run
+
 ### Requirement: Klipper main-loop health
 Optimized configuration SHALL unregister the vendor Box load-cell timers (`_read_wei_timer`, `_init_probe_data_advance`) once they are stopped and the vendor object no longer holds them, and SHALL leave every other timer registered. It SHALL warn when Klipper's timers pile up or its main loop stays saturated, SHALL report Klipper's recent load when an endstop sync fails, and SHALL log MCU commands that Klipper sends too late to take effect on time.
 
@@ -876,12 +904,18 @@ Optimized configuration SHALL unregister the vendor Box load-cell timers (`_read
 #### Scenario: Endstop sync timeout
 - **WHEN** a homing move fails with `Communication timeout during homing`, or a load-cell probe move fails with `WEIGHT sensor error`, QIDI's report of a failed endstop sync
 - **THEN** the console and `klippy.log` name the MCUs involved, the MCUs whose sync timed out, and for each MCU the largest gap between its status reports by its own clock and by Klipper's receive time, along with Klipper's main-thread load and largest timer delay over the previous 10 seconds and the timer count
-- **AND** `klippy.log` lists each MCU's last status reports with their receive and send spacing
+- **AND** the console also gives, for each MCU, the least time it had left before its timeout when Klipper read the report that renews it and whose report that was, the longest time a report took from the MCU to Klipper, and any retransmits, invalid bytes, or serial-port errors during the sync
+- **AND** `klippy.log` lists each MCU's last status reports with their receive and send spacing, and how often Klipper's threads were preempted and the per-CPU serial and USB interrupt and softirq counts during the sync
 - **AND** the error is otherwise unchanged
 
+#### Scenario: Passing endstop syncs
+- **WHEN** homing or probing moves pass their endstop syncs
+- **THEN** once none has run for 3 seconds, `klippy.log` gets one line for them with the sync count and, for each MCU, the least time it had left before its timeout, whose report renewed it, the longest report delay, and any link errors
+- **AND** the console gets nothing
+
 #### Scenario: Late MCU command
-- **WHEN** Klipper sends an MCU a command whose format has a `clock` or `report_clock` parameter, through Klipper's Python command wrappers, and that clock is less than 5 ms ahead of the MCU's estimated time, or of the clock of an earlier command it is held behind
-- **THEN** `klippy.log` gets a warning naming the MCU, the command, how many ms late or ahead it is, and the Python calls that sent it, at most once every 10 s for each MCU and command, with a count of the ones in between
+- **WHEN** Klipper sends an MCU a command whose format has a `clock` or `report_clock` parameter, through Klipper's Python command wrappers, and that clock is less than 5 ms ahead of the MCU's estimated time, or of the clock of an earlier command it is held behind, or 2^31 MCU ticks or more ahead, which the MCU's 32-bit clock reads as past
+- **THEN** `klippy.log` gets a warning naming the MCU, the command, how many ms late or ahead it is, for one too far ahead how far the MCU's clock reaches, and the Python calls that sent it, at most once every 10 s for each MCU and command, with a count of the ones in between
 - **AND** the command is sent unchanged, and commands without a clock parameter are not checked
 
 ### Requirement: Macros read cheap printer facts
@@ -926,6 +960,25 @@ The package's Moonraker fixes module SHALL run the TLS handshake of the vendor M
 - **WHEN** the vendor MQTT component lacks the attributes the module was written for
 - **THEN** the module changes nothing and Moonraker's log says the fix was not applied
 
+### Requirement: LAN-only mode stops the cloud MQTT retries
+When a vendor config update turns LAN-only mode on (`general.lan_mode` `"1"`) while the vendor MQTT component is not connected, the package's Moonraker fixes module SHALL, after the vendor handler succeeds, send that component its own disconnect request and clear Moonraker's MQTT warning and failed `mqtt` component.
+
+#### Scenario: Retries that never connected
+- **WHEN** LAN-only mode is turned on while the vendor MQTT component is retrying a connection that the broker refuses
+- **THEN** the retries stop, and Moonraker reports no MQTT warning or failed `mqtt` component
+
+#### Scenario: Connected printer
+- **WHEN** LAN-only mode is turned on while the vendor MQTT component is connected
+- **THEN** only the vendor handler closes the connection
+
+#### Scenario: LAN-only mode turned off
+- **WHEN** a config update turns LAN-only mode off or changes another setting
+- **THEN** the vendor MQTT component's connection and retries are as the vendor handler leaves them
+
+#### Scenario: Unrecognized vendor database code
+- **WHEN** the vendor database component has no config update handler the module was written for
+- **THEN** the module leaves it unpatched and Moonraker's log says the fix was not applied
+
 ### Requirement: Upstream Klipper fixes
 Optimized configuration SHALL apply upstream Klipper's fixes for homing endstop sync timing, MCU restart shutdowns, command waits on lost MCUs, TMC enable order, heater main-loop and stale-temperature checks, and concurrent timer runs, each only when the function it replaces matches the vendor original it was written for, and SHALL log which were applied and which were skipped.
 
@@ -948,6 +1001,22 @@ Optimized configuration SHALL apply upstream Klipper's fixes for homing endstop 
 #### Scenario: Timer rescheduled while its run is paused
 - **WHEN** a timer's callback pauses and another task calls `update_timer` for it
 - **THEN** the callback is not started again until the paused run returns
+
+### Requirement: Fan and pin requests stay within their MCU's reach
+When the vendor fan and output pin functions match their originals, optimized configuration SHALL queue `M106`, `M107`, `SET_FAN_SPEED`, and `SET_PIN` requests in upstream Klipper's G-code request queue and send each no earlier than 3 s before it takes effect, with the vendor fan and pin code still setting the pin. The fix is listed and skipped as the other upstream Klipper fixes are.
+
+#### Scenario: Fan or pin request after a long move
+- **WHEN** `M106`, `M107`, `SET_FAN_SPEED`, or `SET_PIN` follows a move that ends more than 3 s ahead of the MCU
+- **THEN** its MCU command is sent 3 s before the move ends, for the move's end
+- **AND** requests for the same time collapse to the last, and a request that changes nothing sends nothing
+
+#### Scenario: Fan or pin request already due
+- **WHEN** a queued fan or pin request's time has passed by the time it is sent
+- **THEN** it is scheduled 0.1 s ahead of the MCU instead
+
+#### Scenario: Shutdown with requests queued
+- **WHEN** Klipper shuts down while fan or pin requests are queued
+- **THEN** they are dropped unsent
 
 ### Requirement: Early stepper enables stay schedulable
 When the vendor stepper enable function matches the original that enables `ENABLE_DELAY_TIME` before a stepper's first step, optimized configuration SHALL schedule the enable at that time but no earlier than 20 ms after the later of the stepper MCU's estimated time and the enable pin's previous change, and no later than the first step. The enable callbacks, the pin, and the vendor `ENABLE delay` log line SHALL use that same time.

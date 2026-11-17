@@ -4,15 +4,16 @@ import argparse
 import json
 import subprocess
 import sys
+import urllib.request
 from pathlib import Path
 
 from . import addons
-from .errors import InstallerError, PrinterStateError
+from .errors import InstallerError
 from .locking import acquire
 from .manifest import load_manifest
 from .models import RuntimePaths
 from .reporter import create_reporter
-from .safety import ensure_no_recovery_sentinel, query_printer_state
+from .safety import ensure_no_recovery_sentinel
 from .sudo import SudoError, authenticate_sudo
 
 SYSTEM_ROOT_ENV = "TLTG_OPTIMIZED_SYSTEM_ROOT"
@@ -75,7 +76,7 @@ def main(
                 except SudoError as exc:
                     raise addons.AddonError(
                         "sudo didn't accept the printer's default password. Run "
-                        f"~/tltg-optimized-macros/addons.sh {args.action} {args.addon} over SSH and enter it there."
+                        f"~/valve-oil/addons.sh {args.action} {args.addon} over SSH and enter it there."
                     ) from exc
             if args.action == "relink":
                 addons.relink_addon(args.addon, server=args.server, root=root, sudo_password=sudo_password, run=run, status=reporter.status)
@@ -100,15 +101,21 @@ def main(
     return 0
 
 
-def _ensure_not_printing(moonraker_url: str) -> None:
-    # Building an add-on's environment takes the CPU and memory a print needs. A stopped Moonraker or Klipper can't be
-    # printing, so an unknown state doesn't block.
+def _ensure_not_printing(moonraker_url: str, *, urlopen=urllib.request.urlopen) -> None:
+    """Refuse while a print is running or paused, or Klipper is running G-code, such as a calibration, which
+    idle_timeout reports as "Printing": building an add-on's environment takes the CPU and memory those need. A heater
+    that is on doesn't count. A stopped Moonraker or Klipper can't be printing, so an unknown state doesn't block.
+    installer/system/tltg_addons.py busy_state reads the same answer the same way."""
+    base = moonraker_url.split("?", 1)[0]
     try:
-        state = query_printer_state(moonraker_url)
-    except PrinterStateError:
+        with urlopen(f"{base}?print_stats=state&idle_timeout=state", timeout=5) as response:
+            status = json.load(response)["result"]["status"]
+        print_stats, idle_timeout = (status.get(name) or {} for name in ("print_stats", "idle_timeout"))
+        busy = print_stats.get("state") in {"printing", "paused"} or idle_timeout.get("state") == "Printing"
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return
-    if state in {"printing", "paused"}:
-        raise addons.AddonError("Add-ons can be installed, updated, or removed only while the printer is not printing.")
+    if busy:
+        raise addons.AddonError("Add-ons can be installed, updated, or relinked only while the printer isn't printing or calibrating.")
 
 
 def maybe_update_installed_addons(*, paths: RuntimePaths, manifest, reporter, input_stream, environ: dict[str, str], run) -> None:
@@ -119,7 +126,7 @@ def maybe_update_installed_addons(*, paths: RuntimePaths, manifest, reporter, in
     try:
         sudo_password = None if root != Path("/") else authenticate_sudo(run=run, environ=environ, reporter=reporter, input_stream=input_stream)
     except SudoError:
-        reporter.line("Warning: add-ons were not updated because sudo failed; run ~/tltg-optimized-macros/addons.sh update <id>.")
+        reporter.line("Warning: add-ons were not updated because sudo failed; run ~/valve-oil/addons.sh update <id>.")
         return
     failures = addons.update_installed_addons(
         spec=manifest.addons,
@@ -143,7 +150,7 @@ def maybe_remove_addons(*, paths: RuntimePaths, reporter, input_stream, environ:
     try:
         sudo_password = None if root != Path("/") else authenticate_sudo(run=run, environ=environ, reporter=reporter, input_stream=input_stream)
     except SudoError:
-        reporter.line("Warning: add-ons were not removed because sudo failed; run ~/tltg-optimized-macros/addons.sh remove <id> first.")
+        reporter.line("Warning: add-ons were not removed because sudo failed; run ~/valve-oil/addons.sh remove <id> first.")
         return
     for failure in addons.remove_all_addons(root=root, sudo_password=sudo_password, run=run, status=reporter.status):
         reporter.line(f"Warning: add-on not removed. {failure}")

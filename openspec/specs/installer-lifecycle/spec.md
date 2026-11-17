@@ -208,10 +208,11 @@ Every install and update SHALL apply the host OS optimizations, leaving only whe
 - **AND** an interactive install asks only whether to turn off QIDI AI detection, and only while its service is running; otherwise, and in every noninteractive run, the recorded AI detection choice stands, keeping AI detection on when none was recorded
 - **AND** `--disable-ai-detection` or `--keep-ai-detection` replaces the recorded AI detection choice without asking
 
-#### Scenario: The unauthenticated ADB root shell is closed
-- **WHEN** install, update, or automatic-update reconciliation applies the OS optimizations and QIDI's `usbdevice.service` is enabled or running
-- **THEN** the service is stopped and disabled, so no ADB daemon listens on the network after the operation or after reboot
-- **AND** uninstall restores the service's recorded state only when the operator accepts restoring the OS optimizations
+#### Scenario: The unauthenticated ADB root shell is off the network
+- **WHEN** install, update, or automatic-update reconciliation applies the OS optimizations
+- **THEN** QIDI's ADB daemon no longer listens on any network after the operation or after reboot, and a running `usbdevice.service` keeps serving ADB on the board's USB port
+- **AND** a `usbdevice.service` an earlier package version stopped and disabled is put back to its recorded state once the network port is closed, and leaves the restoration record
+- **AND** uninstall reopens the network port only when the operator accepts restoring the OS optimizations
 
 #### Scenario: Enabled policy reconciles only recognized host state
 - **WHEN** system optimizations are enabled
@@ -471,12 +472,13 @@ Normal install and update SHALL expose QIDI's touchscreen filament database dire
 - **THEN** the link is removed only while it still points at the database directory; an operator-replaced entry is preserved
 
 ### Requirement: Safe unattended updates
-Automatic updates SHALL require durable operator enrollment, use the same admission, ownership, recovery, activation, and persisted host-policy rules as direct installation, and advance release state only after successful activation.
+The update check SHALL be scheduled on every installation. Installing a release, starting a firmware update, or flashing a board unattended SHALL require durable operator enrollment; without it the check only publishes what is waiting. Unattended work SHALL use the same admission, ownership, recovery, activation, and persisted host-policy rules as direct installation, and advance release state only after successful activation.
 
 #### Scenario: Enrolled release installation is idle and integrity checked
-- **WHEN** an enrolled updater observes a new release checksum or missing or drifted optimized installation state
+- **WHEN** an enrolled updater observes a new release checksum, a published release newer than the installed one, or missing or drifted optimized installation state
 - **THEN** update proceeds only while the printer is idle, with no print running or paused and every heater target 0, and after archive integrity and path safety are verified
 - **AND** missing or drifted state runs the current release installer even when its checksum is unchanged
+- **AND** the release is downloaded and unpacked under the installer's cache in the printer user's home, never `/tmp`, and nothing of the download is left once the bundle is in place or the attempt fails
 - **AND** the bundled noninteractive installer performs the change
 - **AND** release state advances only after install and required Klipper activation succeed
 - **AND** any host reboot is considered only after that state is durable and printer idleness is revalidated
@@ -489,34 +491,31 @@ Automatic updates SHALL require durable operator enrollment, use the same admiss
 - **AND** an already-current release reconciles the OS optimizations while idle
 
 #### Scenario: Update plumbing is ownership-bound
-- **WHEN** automatic updates are enabled, repaired, disabled, or removed during uninstall
+- **WHEN** Valve Oil is installed, repaired, or uninstalled
 - **THEN** only installer-owned scheduling, durable enrollment, and checksum state is created, repaired, or removed
-- **AND** successful setup records enrollment outside firmware-cleaned configuration
-- **AND** disable or uninstall removes enrollment before privileged timer cleanup so a surviving service cannot install or reconcile
+- **AND** enrollment is recorded outside firmware-cleaned configuration
+- **AND** an earlier release's automatic-update units, which it wrote only when automatic updates were turned on, keep the printer enrolled when an install replaces them
+- **AND** uninstall removes enrollment before privileged timer cleanup so a surviving service cannot install or reconcile
 - **AND** plumbing failure is reported separately from successful configuration or uninstall work
 
-### Requirement: THR firmware programming requires per-run opt-in
-The installer SHALL ask supported interactive installations whether to flash the THR FIFO fix after preflight and before configuration changes, defaulting to No. An explicit yes or install-only CLI option SHALL authorize only that invocation. `--yes` alone, unattended updates, restore, and uninstall MUST NOT program MCU firmware or persist permission to do so.
+#### Scenario: A check without enrollment changes nothing
+- **WHEN** the update check runs on a printer that is not enrolled
+- **THEN** it publishes what is waiting and records the fetched checksum
+- **AND** it installs no release, starts no firmware update, reconciles nothing, reads or flashes no board, starts, stops, or restarts no service, uses no sudo, and schedules no reboot
 
-#### Scenario: Firmware option is absent
-- **WHEN** the operator declines, submits an empty answer, reaches end of input, or runs unattended without the explicit firmware option
-- **THEN** no THR serial session, firmware backup, reset, or programming occurs
+#### Scenario: Automatic updates are switched on or off
+- **WHEN** the operator switches automatic updates in Fluidd, in Valve Oil UI, or with `auto-update.sh`
+- **THEN** only the enrollment changes, without a password, and it takes effect at the next check
+- **AND** the check stays scheduled either way
 
-#### Scenario: Firmware option is explicitly selected
-- **WHEN** an operator explicitly accepts the interactive question or selects the install-only THR firmware option
-- **THEN** the installer explains the firmware/recovery risk and performs the operation under the installer lock after configuration installation and required activation
-- **AND** the interactive question and README warn that input shaper calibration must be rerun after flashing, and a verified flash ends by telling the operator to run it before bed leveling or printing; the installer does not initiate calibration
-- **AND** the THR operation never changes `printer.cfg`, so the saved input shaper calibration stays in effect until the operator recalibrates
-- **AND** dry-run reports the proposed firmware work without service changes, serial access, or firmware backup creation
-
-### Requirement: Optional THR transfer is admitted and byte-verified
-The optional operation SHALL require supported firmware, idle ready state, zero heater targets, exclusive service ownership, and exact known THR application/bootloader identities. It MUST preserve stock recovery files before erase and verify the complete resulting application and unchanged bootloader before success.
+### Requirement: THR transfer is admitted and byte-verified
+The THR transfer SHALL require supported firmware, idle ready state, zero heater targets, exclusive service ownership, and exact known THR application/bootloader identities. It MUST preserve stock recovery files before erase and verify the complete resulting application and unchanged bootloader before success. It MUST NOT change `printer.cfg`.
 
 #### Scenario: Known stock or patched application is detected
 - **WHEN** safe preconditions hold and readback matches an admitted image
-- **THEN** stock firmware receives only the pinned THR patch with retained recovery files
+- **THEN** stock firmware receives only the THR image pinned for the target firmware with retained recovery files
 - **AND** an already-patched board is verified without another erase or transfer
-- **AND** a board with an earlier build of the fix listed in the manifest receives the pinned patch of QIDI's stock THR image from the THR firmware backups or the printer's update folder, with that stock image as the transfer's recovery backup, and without one no erase or transfer occurs
+- **AND** a board with an earlier build listed in the manifest receives the pinned patch of QIDI's stock THR image from the THR firmware backups or the printer's update folder, with that stock image as the transfer's recovery backup, and without one no erase or transfer occurs
 - **AND** only previously active services are restored and printer readiness is checked
 
 #### Scenario: Klipper is still restarting
@@ -526,21 +525,25 @@ The optional operation SHALL require supported firmware, idle ready state, zero 
 - **AND** if Klipper does not become ready in time, no service is stopped and no THR serial session or programming occurs
 
 #### Scenario: Installed bootloader is unrecognized
-- **WHEN** readback finds a THR bootloader that matches no admitted identity
-- **THEN** the installer reports that the FIFO fix is unavailable for this bootloader and THR firmware was not changed
+- **WHEN** an update of an existing installation reads a THR bootloader that matches no admitted identity
+- **THEN** the installer reports that this project's THR firmware is unavailable for this bootloader and THR firmware was not changed
 - **AND** it asks the operator to attach the capture's shareable summary to a GitHub issue
 - **AND** the read-only capture stays with the recovery files, only previously active services are restored, and no firmware blocker remains
 - **AND** the configuration installation result is unaffected
 
 #### Scenario: Interrupted transfer falls back to stock firmware
 - **WHEN** a recovery-mode transfer reports that the stock fallback image was programmed
-- **THEN** the installer verifies complete readback against the stock application, restores previous service states without a firmware blocker, keeps input shaper calibration, and reports that the FIFO fix was not applied
+- **THEN** the installer verifies complete readback against the stock application, restores previous service states without a firmware blocker, keeps input shaper calibration, and reports that this project's THR firmware was not applied
 
 #### Scenario: Admission fails or firmware work is interrupted
 - **WHEN** firmware admission fails or firmware work does not reach verified readback
 - **THEN** no unknown image is programmed and verified configuration installation is preserved
 - **AND** potentially changed or unverified firmware retains recovery evidence, stopped serial-owning services, and a durable blocker against later installer operations
 - **AND** configuration restore and uninstall never claim to revert MCU firmware
+
+#### Scenario: Dry run
+- **WHEN** the installer runs with `--dry-run`
+- **THEN** it reports the proposed THR work without service changes, serial access, or firmware backup creation
 
 ### Requirement: Package-owned Klipper extra modules
 Install and update SHALL place each bundled package-owned Klipper extra module, together with the optimized configuration section that loads it, and uninstall SHALL remove the module only when it still matches the bundled payload.
@@ -757,6 +760,28 @@ Normal install and update SHALL patch reviewed builds of QIDI's touchscreen exec
 - **THEN** it is left unchanged and recorded without failing other host patches
 - **AND** uninstall restores an unchanged patched executable to QIDI's original and restarts the touchscreen app
 
+### Requirement: Klipper C helper library carries upstream fixes
+Normal install and update SHALL replace a reviewed build of QIDI's Klipper C helper library, `klippy/chelper/c_helper.so`, with the package's build of the same Klipper sources with upstream's later fixes for expired pressure advance entries, trsync timeout extension, step queue appends far in the future, and serial queue pipe descriptors, independently of optional OS optimization policy, with the same preservation and restoration as the other guarded host patches.
+
+#### Scenario: A reviewed library is replaced
+- **WHEN** install or update finds a C helper library whose SHA-256 is a reviewed QIDI build
+- **THEN** it backs up QIDI's library, renames the package's build into place, keeps its mode and owner, and restarts the Klipper service once
+- **AND** QIDI's C sources are left unchanged and the library is never older than them, so Klipper loads it without rebuilding it
+- **AND** a library that is already the package's build is left unchanged
+
+#### Scenario: Pressure advance changes are freed
+- **WHEN** `SET_PRESSURE_ADVANCE` changes the value repeatedly while step generation advances
+- **THEN** each pressure advance entry step generation no longer needs is freed, so Klipper's memory does not grow with the number of changes
+
+#### Scenario: Other libraries are preserved
+- **WHEN** the library is missing, is not a reviewed build, or was modified after installation
+- **THEN** it is left unchanged and recorded without failing other host patches
+- **AND** uninstall restores an unchanged package library to QIDI's library and restarts the Klipper service
+
+#### Scenario: The libraries are reproducible
+- **WHEN** `scripts/build_klipper_chelper.py` builds upstream Klipper at QIDI's snapshot, unpatched and with the patches in `chelper/`
+- **THEN** the unpatched build is QIDI's library byte for byte and the patched build is the package's
+
 ### Requirement: Klipper and Moonraker come back after exiting outside systemd
 Normal install and update SHALL make systemd start Klipper and Moonraker again when their processes exit without systemd stopping them, independently of optional OS optimization policy, with the same recognition, preservation, and restoration as the other guarded host patches.
 
@@ -803,6 +828,7 @@ Normal install and update SHALL run Klipper at a higher CPU priority than Moonra
 #### Scenario: QIDI's tuning script is replaced
 - **WHEN** install or update applies the CPU tuning drop-ins
 - **THEN** `qidi-tuning.service` runs once per boot, pinning the toolhead serial interrupt to CPU 2 and the USB host controllers' interrupts to CPU 3, instead of rerunning QIDI's script every 35 s
+- **AND** it pins each interrupt once the kernel lists it, including the toolhead serial interrupt that appears only after Klipper first opens the port, without holding up boot
 - **AND** `irqbalance` starts with those interrupts banned, so they keep their CPUs across Klipper restarts
 - **AND** uninstall removes unchanged drop-ins and restarts both services, which brings back QIDI's script
 
@@ -850,7 +876,13 @@ After an install or automatic update that applies zram swap, the CPU governor, a
 #### Scenario: An install reboots without asking
 - **WHEN** an install, interactive or `--yes`, applied any of those changes in this boot, or leaves a Rockchip reboot pending
 - **THEN** it schedules a reboot about 10 seconds later, which runs only if no print is running or paused and every heater target is 0, both when it is scheduled and when it runs
+- **AND** when the scheduled reboot runs, a printer state that can't be read, as while Klipper starts, is read again for up to 5 minutes before the reboot is left pending
 - **AND** an install during a print, or one that cannot read the printer state, reboots nothing and tells the operator to reboot
+
+#### Scenario: A QIDI firmware update reboots when it ends
+- **WHEN** the install a QIDI firmware update runs applied any of those changes or leaves a Rockchip reboot pending, and the update succeeds
+- **THEN** the update schedules the reboot about 30 seconds after it ends, whether or not a session follows it, with the same checks when it runs, and its result says the printer restarts
+- **AND** a session following the update schedules no reboot of its own
 
 #### Scenario: Automatic updates reboot once Klipper is idle
 - **WHEN** an automatic-update check finds such a reboot pending from this boot
@@ -907,7 +939,7 @@ The installer bundle SHALL provide `box-firmware.sh` with `status`, `install`, `
 - **THEN** each configured USB Box's firmware is reported and no Box serial session, service change, or programming occurs
 
 ### Requirement: Installs bring USB Boxes to the bundled Box firmware
-After the rest of an install or update, including one run with `--yes` and the install an automatic update runs for a new release, the installer SHALL run the `box-firmware.sh install` flow for every configured USB Box without the `FLASH` prompt. Dry runs, uninstall, restore, and automatic update checks that install nothing MUST NOT flash Box firmware.
+After the rest of an install or update, including one run with `--yes` and the install an automatic update runs for a new release, the installer SHALL run the `box-firmware.sh install` flow for every configured USB Box without the `FLASH` prompt. An enrolled printer's update check SHALL run the same flow when a configured USB Box is not on the bundled firmware. Dry runs, uninstall, restore, and update checks on a printer that is not enrolled MUST NOT flash Box firmware.
 
 #### Scenario: Install flashes Boxes that need it
 - **WHEN** an install finishes on an idle printer with zero heater targets and a USB Box on QIDI's stock firmware or an earlier build of this project
@@ -917,13 +949,18 @@ After the rest of an install or update, including one run with `--yes` and the i
 - **WHEN** an automatic update installs a new release on an idle printer with a USB Box that needs the bundled firmware
 - **THEN** that Box is flashed and verified as for an install, and the automatic-update timer is running again afterward
 
+#### Scenario: Update check finds a Box connected since the last release
+- **WHEN** an enrolled printer's update check finds the release already installed and a configured USB Box on QIDI's stock firmware that `box-firmware.sh restore` did not put there
+- **THEN** that Box is flashed and verified as for an install
+- **AND** when that attempt stops before any write, later checks don't stop services for that Box again until it reports another version or another release is installed, and the waiting work says the next install tries again
+
 #### Scenario: Automatic update finds a Box captured as unsupported
 - **WHEN** an automatic update installs a release and the newest capture of a USB Box found a bootloader or application that release still does not admit
 - **THEN** that Box is skipped without stopping services or capturing it again, and the output names the earlier capture's summary and where to open a support issue
 - **AND** once a release admits what the capture found, the next automatic update that installs it flashes that Box
 
 #### Scenario: Automatic updates and dry runs
-- **WHEN** an automatic update check finds the release already installed, or the installer runs with `--dry-run`
+- **WHEN** an update check finds the release already installed and every configured USB Box current or restored by the operator, or the printer is not enrolled, or the installer runs with `--dry-run`
 - **THEN** no Box serial session, reset, or programming occurs
 
 ### Requirement: An install's Box flash never hides a failure
@@ -934,7 +971,7 @@ When the install's Box flow stops before any Box write, the install SHALL still 
 - **THEN** no Box is touched, the install succeeds, and the output says the Box firmware was not updated and why
 
 #### Scenario: Install finds a Box it doesn't support yet
-- **WHEN** an install leaves a USB Box unchanged because its bootloader or firmware is not admitted, or an automatic update skips it for an earlier such capture
+- **WHEN** an update of an existing installation leaves a USB Box unchanged because its bootloader or firmware is not admitted, or an automatic update skips it for an earlier such capture
 - **THEN** the capture's shareable summary is copied to Klipper's log folder as `tltg_box_firmware_box<N>.json`, and from Klipper's next start `tltg_printer_warnings.warnings` lists a `warning` entry for that Box that names the file and where to open a support issue
 - **AND** the copy, and with it the warning, is removed once an install finds that Box on the bundled firmware or the Box is no longer in `box.cfg`
 
@@ -946,7 +983,7 @@ When the install's Box flow stops before any Box write, the install SHALL still 
 The package SHALL let the operator install, update, and remove the add-ons pinned in `installer/package.yaml` (`addons:`) from Fluidd or `addons.sh`, changing nothing on the host but each add-on's directories under `~/tltg-addons/` and its systemd unit. Add-ons MUST NOT install system packages, change `printer_data/config`, or add Moonraker update-manager sections.
 
 #### Scenario: An add-on installs offline into its own directories
-- **WHEN** the operator installs an add-on while the printer is not printing or paused
+- **WHEN** the operator installs an add-on while no print is running or paused and Klipper is not running G-code such as a calibration, whether or not a heater is on
 - **THEN** its source, pinned wheels, and pinned source-only packages are verified against the manifest before anything is written, and it gets its own Python environment without pip under its directory
 - **AND** pinned source-only packages are pure Python and are built offline after the wheels, with the setuptools pinned among the wheels
 - **AND** its settings and identity are kept in a separate data directory that updates keep
@@ -1005,7 +1042,7 @@ Normal install and update SHALL provide a package-owned add-ons service and a Fl
 - **WHEN** a client calls the add-ons route
 - **THEN** it is served only if Moonraker authorizes that client, by trusted address or by Fluidd's login, and the service listens only on the printer's loopback address
 - **AND** a request that changes add-ons is refused unless it is a JSON request from the same origin carrying `X-Valve-Oil: addons`
-- **AND** installs, updates, and relinks are refused while a print is running or paused
+- **AND** installs, updates, and relinks are refused while a print is running or paused or Klipper is running G-code such as a calibration, and not because a heater is on
 
 #### Scenario: Changes finish and report on their own
 - **WHEN** an add-on change starts
@@ -1053,3 +1090,76 @@ The installer SHALL admit QIDI Plus 5 firmware `01.01.02.01` as the Plus 5, with
 - **WHEN** the Printer screen card shows a Plus 5, whose landscape UI is drawn into a 480×800 framebuffer
 - **THEN** the card shows the UI upright
 - **AND** a tap on the card presses the touchscreen at the control shown under it
+
+### Requirement: The touchscreen shows the install
+From a non-dry-run install or update's first board read until it ends, the installer SHALL hold QIDI's touchscreen app stopped and show a Valve Oil install screen on the panel, and SHALL start the app again when the install ends unless a board or installer operation needs recovery or a QIDI firmware update it started has taken the app over.
+
+#### Scenario: An install on an idle printer
+- **WHEN** an install or update, automatic ones included, begins with the touchscreen app running and no print running or paused and no heater on
+- **THEN** a watcher that starts the app if the installer ends without doing so is armed before the app is stopped, and the panel shows the install screen before the boards are read
+- **AND** restarts of the app that install steps ask for wait, and the app starts once when the install ends, whether it succeeded or failed
+
+#### Scenario: The install starts a QIDI firmware update
+- **WHEN** the firmware update the install starts stops the app and shows its own screen
+- **THEN** neither the install nor its watcher starts the app, which the update starts when it ends
+- **AND** when the update ends without changing anything and the install carries on for the current firmware, the install holds the app and shows its screen again
+
+#### Scenario: A board needs recovery
+- **WHEN** the install ends, or its process ends, with a board or installer recovery record present
+- **THEN** the app stays stopped, as an unverified board write requires, and the panel says the install didn't finish
+
+#### Scenario: The touchscreen isn't taken
+- **WHEN** the run is a dry run, a print is running or paused, a heater is on, the app isn't running, or sudo or the watcher can't be started
+- **THEN** the app is left as it was and no screen is drawn
+- **AND** the install a QIDI firmware update runs leaves the app stopped under the update's own screen, holding its restarts for the update to start the app
+
+### Requirement: DNS is left to QIDI's dhcpcd hook
+Where QIDI's firmware installs its dhcpcd exit hook that writes `/etc/resolv.conf` with fallback servers, the OS optimizations SHALL NOT change the printer's DNS settings, and SHALL hand back a DNS change an earlier install made.
+
+#### Scenario: QIDI's hook is present
+- **WHEN** an install, update, or automatic-update reconciliation applies the OS optimizations on a printer with QIDI's hook
+- **THEN** it doesn't link `/etc/resolv.conf` or write resolvconf's head and tail
+
+#### Scenario: An earlier install changed DNS
+- **WHEN** it applies them with QIDI's hook present and a recorded DNS change
+- **THEN** `/etc/resolv.conf`, while still the installer's link, becomes a regular file holding the servers in use, resolvconf's head and tail return to their preimages while they still hold the installer's content, and the change is no longer recorded for uninstall
+
+#### Scenario: QIDI's hook is absent
+- **WHEN** it applies them on firmware without the hook
+- **THEN** it adds the fallback DNS servers as before, and uninstall can restore their preimages
+
+### Requirement: The installer lives in ~/valve-oil
+The installed bundle SHALL be the `valve-oil` folder in the printer user's home, and an install SHALL replace the `tltg-optimized-macros` folder earlier releases installed with a link to it.
+
+#### Scenario: A release is downloaded
+- **WHEN** `install-latest.sh` or an update check of this release installs a release
+- **THEN** the archive has `valve-oil/` at its root and unpacks to `~/valve-oil`, and the ownership repair covers that folder as it covers paths named `tltg`
+- **AND** a release also publishes `tltg-optimized-macros.tar.gz` with `tltg-optimized-macros/` at its root, which the update check of releases up to 26.11.12.2 downloads and accepts
+
+#### Scenario: An install runs where an earlier release installed
+- **WHEN** an install or update, automatic ones and the install a QIDI firmware update runs included, ends successfully on a printer with a `~/tltg-optimized-macros` folder
+- **THEN** `~/valve-oil` holds the running bundle, and `~/tltg-optimized-macros` becomes a link to it once it does, so a process still running from the earlier folder reads the same files
+- **AND** an update check running from the earlier folder, left by an install that stopped first, still installs the release
+
+### Requirement: Valve Oil's boot screen
+An install SHALL replace QIDI's boot logo with Valve Oil's in a boot partition of the reviewed layout, and SHALL play Valve Oil's boot animation from early in the boot until QIDI's touchscreen app runs. Uninstall SHALL put QIDI's boot logo back.
+
+#### Scenario: A boot partition of the reviewed layout
+- **WHEN** an install finds an Android boot image whose id matches its parts and whose resource image holds `logo.bmp` and `logo_kernel.bmp` as full-screen 24-bit BMPs
+- **THEN** the partition is saved and its copy verified, both logos are replaced with Valve Oil's in their stored geometry, the id is recomputed, only those blocks are written, logos before the header, and the partition is read back
+- **AND** the kernel, the device tree, and every other byte are unchanged
+- **AND** a readback that doesn't match writes QIDI's bytes back and the install goes on
+
+#### Scenario: Any other boot partition
+- **WHEN** the boot partition doesn't hold such an image
+- **THEN** nothing is written, and the install says it kept QIDI's boot logo and why
+
+#### Scenario: Uninstall
+- **WHEN** Valve Oil is uninstalled and the partition holds what Valve Oil wrote
+- **THEN** QIDI's bytes are written back from the saved partition and verified, and the record and the saved partition are removed
+- **AND** a partition changed since Valve Oil wrote it is left as it is
+
+#### Scenario: The boot animation
+- **WHEN** the printer boots with the animation installed
+- **THEN** it plays from shortly after local file systems are mounted until a touchscreen app process exists, at most 2 minutes, and ends on its first frame, which is the boot logo
+- **AND** it draws nothing while a QIDI firmware update or an install shows its own screen, or when the touchscreen app already runs

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import re
 import types
 import unittest
@@ -20,7 +21,16 @@ MAX4_MACRO_ROOT = PRINTER_MACRO_ROOT / "max4"
 NEWEST_STOCK = {
     "max4": REPO_ROOT / "installer/stock/qidi-max4-defaults/firmwares/01.01.07.01",
     "plus5": REPO_ROOT / "installer/stock/qidi-plus5-defaults/firmwares/01.01.02.01",
+    "smart5": REPO_ROOT / "installer/stock/qidi-smart5-defaults/firmwares/01.01.02.01",
 }
+# Behind the bed some printers' toolheads fit only around the chute: (rear Y, lowest X, highest X).
+REAR_CHUTE_WINDOW = {
+    # Behind Y320 the Plus 5's toolhead can only be between X75 and X231 (the Max 4's rear is open in X).
+    "plus5": (320, 75, 231),
+    # Behind the Smart 5's bed QIDI moves only between X66 and X100.
+    "smart5": (180, 66, 100),
+}
+TRAVEL = {"plus5": {"X": (-7, 326), "Y": (-5, 340)}, "smart5": {"X": (-2, 185), "Y": (-4, 200)}}
 
 
 class OptimizedMacroContractTests(unittest.TestCase):
@@ -42,14 +52,21 @@ class OptimizedMacroContractTests(unittest.TestCase):
         self.assertIn("[temperature_sensor Toolhead_MCU]", temperatures)
         self.assertIn("sensor_type: temperature_mcu", temperatures)
         self.assertIn("sensor_mcu: THR", temperatures)
-        self.assertIn("[adc_temperature GD32F425]", temperatures)
-        self.assertIn("temperature1: 0\nvoltage1: 1.5100", temperatures)
-        self.assertIn("temperature2: 100\nvoltage2: 1.0700", temperatures)
-        self.assertIn("[temperature_sensor Mainboard_MCU]", temperatures)
-        self.assertIn("sensor_type: GD32F425", temperatures)
-        self.assertIn("sensor_pin: ADC_TEMPERATURE", temperatures)
-        self.assertIn("min_temp: -100\nmax_temp: 500", temperatures)
         self.assertNotIn("sensor_mcu: mcu", temperatures)
+        # The GD32F425 mainboard sensor is the Max 4's and Plus 5's; the Smart 5's i.MX RT mainboard has none.
+        self.assertNotIn("ADC_TEMPERATURE", temperatures)
+        for printer in ("max4", "plus5"):
+            with self.subTest(printer=printer):
+                profile = (PRINTER_MACRO_ROOT / printer / "printer_profile.cfg").read_text(encoding="utf-8")
+                self.assertIn("[adc_temperature GD32F425]", profile)
+                self.assertIn("temperature1: 0\nvoltage1: 1.5100", profile)
+                self.assertIn("temperature2: 100\nvoltage2: 1.0700", profile)
+                self.assertIn("[temperature_sensor Mainboard_MCU]", profile)
+                self.assertIn("sensor_type: GD32F425", profile)
+                self.assertIn("sensor_pin: ADC_TEMPERATURE", profile)
+                self.assertIn("min_temp: -100\nmax_temp: 500", profile)
+        smart5 = "\n".join(path.read_text(encoding="utf-8") for path in (PRINTER_MACRO_ROOT / "smart5").glob("*.cfg"))
+        self.assertNotIn("ADC_TEMPERATURE", smart5)
         self.assertNotIn("[temperature_sensor Mainboard_GD32F425]", temperatures)
         self.assertNotIn("[temperature_sensor Mainboard_MCU_Approx]", temperatures)
 
@@ -257,6 +274,9 @@ class OptimizedMacroContractTests(unittest.TestCase):
 
     def test_printer_folders_define_the_same_sections(self):
         # Driver sections only add options to the printer's own stock driver sections, which differ by printer.
+        # Bed screw positions are set up only for printers whose screws have been measured, and the mainboard
+        # temperature sensor only on the GD32F425 mainboards (not the Smart 5's).
+        mainboard_sensor = {"adc_temperature gd32f425", "temperature_sensor mainboard_mcu"}
         sections = {}
         for printer, stock_root in NEWEST_STOCK.items():
             stock = {
@@ -271,8 +291,12 @@ class OptimizedMacroContractTests(unittest.TestCase):
             drivers = {name for name in names if name.startswith("tmc")}
             with self.subTest(printer=printer):
                 self.assertLessEqual(drivers, stock)
-            sections[printer] = sorted(name for name in names if name not in drivers)
+            sections[printer] = sorted(name for name in names if name not in drivers and name != "screws_tilt_adjust"
+                                       and name not in mainboard_sensor)
+            with self.subTest(printer=printer):
+                self.assertEqual(mainboard_sensor <= set(names), printer != "smart5")
         self.assertEqual(sections["plus5"], sections["max4"])
+        self.assertEqual(sections["smart5"], sections["max4"])
 
     def test_plus5_homes_sensorless_without_closed_loop_commands(self):
         text = "\n".join(path.read_text(encoding="utf-8") for path in (PRINTER_MACRO_ROOT / "plus5").glob("*.cfg"))
@@ -309,10 +333,14 @@ class OptimizedMacroContractTests(unittest.TestCase):
             homing_override.index("_OPTIMIZED_RESTORE_DEFAULT_ACCEL WARN=1"), homing_override.rindex("action_raise_error")
         )
 
-    def test_plus5_nozzle_moves_stay_inside_its_travel(self):
-        limits = {"X": (-7, 326), "Y": (-5, 340)}
-        text = (PRINTER_MACRO_ROOT / "plus5/nozzle_motion.cfg").read_text(encoding="utf-8")
-        profile = (PRINTER_MACRO_ROOT / "plus5/printer_profile.cfg").read_text(encoding="utf-8")
+    def test_nozzle_moves_stay_inside_the_printers_travel(self):
+        for printer, limits in TRAVEL.items():
+            with self.subTest(printer=printer):
+                self._assert_nozzle_moves_inside(printer, limits)
+
+    def _assert_nozzle_moves_inside(self, printer, limits):
+        text = (PRINTER_MACRO_ROOT / printer / "nozzle_motion.cfg").read_text(encoding="utf-8")
+        profile = (PRINTER_MACRO_ROOT / printer / "printer_profile.cfg").read_text(encoding="utf-8")
         relative = False
         for line in text.splitlines():
             command = line.split("#")[0].strip()
@@ -327,10 +355,13 @@ class OptimizedMacroContractTests(unittest.TestCase):
             low, high = limits[axis.upper()]
             self.assertTrue(low <= float(value) <= high, f"{axis} {value}")
 
-    def test_plus5_rear_moves_stay_inside_the_chute_x_window(self):
-        # Behind Y320 the Plus 5's toolhead can only be between X75 and X231 (the Max 4's rear is open in X).
-        rear_y, x_low, x_high = 320, 75, 231
-        globals_cfg = (NEWEST_STOCK["plus5"] / "config/klipper-macros-qd/globals.cfg").read_text(encoding="utf-8")
+    def test_rear_moves_stay_inside_the_chute_x_window(self):
+        for printer, window in REAR_CHUTE_WINDOW.items():
+            with self.subTest(printer=printer):
+                self._assert_rear_moves_inside(printer, *window)
+
+    def _assert_rear_moves_inside(self, printer, rear_y, x_low, x_high):
+        globals_cfg = (NEWEST_STOCK[printer] / "config/klipper-macros-qd/globals.cfg").read_text(encoding="utf-8")
         km = types.SimpleNamespace(**{
             name: float(re.search(rf"^variable_{name}: *([\d.]+)", globals_cfg, re.M).group(1))
             for name in ("park_x", "park_y")
@@ -340,7 +371,7 @@ class OptimizedMacroContractTests(unittest.TestCase):
             match.group(1): match.group(2)
             for match in re.finditer(
                 r"^\[gcode_macro (\S+)\]\n(.*?)(?=^\[|\Z)",
-                (PRINTER_MACRO_ROOT / "plus5/nozzle_motion.cfg").read_text(encoding="utf-8"),
+                (PRINTER_MACRO_ROOT / printer / "nozzle_motion.cfg").read_text(encoding="utf-8"),
                 re.M | re.S,
             )
         }
@@ -413,19 +444,22 @@ class OptimizedMacroContractTests(unittest.TestCase):
                     position = target
             return position
 
-        # Unknown, mid-bed, parked in the chute, and behind the wipers at the wipe's exit.
-        starts = (None, (160.0, 160.0), (km.park_x, km.park_y), (140.0, km.park_y))
+        # Unknown, mid-bed, parked in the chute, and at the wipe's far end.
+        center = km.print_max[0] / 2
+        wipe_end = {"plus5": (140.0, km.park_y), "smart5": (66.0, km.park_y)}[printer]
+        starts = (None, (center, center), (km.park_x, km.park_y), wipe_end)
         for name in bodies:
             for start in starts:
                 with self.subTest(macro=name, start=start):
                     run(name, bodies[name], start)
-        for pack in ("orcaslicer_gcode/plus5", "qidistudio_gcode/plus5"):
+        for pack in (f"orcaslicer_gcode/{printer}", f"qidistudio_gcode/{printer}"):
             for path in sorted((REPO_ROOT / pack).glob("*.gcode")):
                 with self.subTest(file=f"{pack}/{path.name}"):
                     run(path.name, path.read_text(encoding="utf-8"), None)
 
     def test_slicer_filament_change_serves_both_box_command_surfaces(self):
-        for pack in ("orcaslicer_gcode", "qidistudio_gcode", "orcaslicer_gcode/plus5", "qidistudio_gcode/plus5"):
+        for pack in ("orcaslicer_gcode", "qidistudio_gcode", "orcaslicer_gcode/plus5", "qidistudio_gcode/plus5",
+                     "orcaslicer_gcode/smart5", "qidistudio_gcode/smart5"):
             with self.subTest(pack=pack):
                 text = (REPO_ROOT / pack / "change_filament.gcode").read_text(encoding="utf-8")
                 self.assert_ordered(
@@ -1222,9 +1256,10 @@ class PrinterWarningsTest(unittest.TestCase):
     input shaper or no saved calibration, and none once both have one, and a
     warning for each Box the installer left a firmware report for."""
 
-    def warnings(self, shaper, unshaped_accel=10000, log_dir=None):
+    def warnings(self, shaper, unshaped_accel=10000, log_dir=None, saved=None):
         objects = {
-            "tltg_macro_status": _Status(max_accel=30000., input_shaper=lambda: shaper),
+            "tltg_macro_status": _Status(max_accel=30000., input_shaper=lambda: shaper,
+                                         saved_shaper_freq=lambda axis: (saved or {}).get(axis, 0.)),
             "gcode_macro _tltg_optimized_globals": _Status(variables={"unshaped_accel": unshaped_accel}),
         }
         handlers = {}
@@ -1256,6 +1291,117 @@ class PrinterWarningsTest(unittest.TestCase):
         self.assertIn("tltg_box_firmware_box2.json", box["message"])
         (log_dir / "tltg_box_firmware_box2.json").unlink()
         self.assertEqual(self.warnings(calibrated, log_dir=log_dir), [])
+
+    def test_unsupported_thr_and_mainboard_reports_carry_their_issue_links(self) -> None:
+        calibrated = {"loaded": True, "unshaped_axes": "", "saved": True}
+        log_dir = temp_path("printer-warnings-")
+        link = "https://github.com/thelegendtubaguy/valve-oil/issues/new?template=printer-support.yml&printer=QIDI%20Max%204"
+        (log_dir / "tltg_thr_firmware.json").write_text(json.dumps({"issue_url": link, "note": "Update it."}))
+        (log_dir / "tltg_mainboard_firmware.json").write_text("{}")
+        mainboard, thr = self.warnings(calibrated, log_dir=log_dir)
+        self.assertEqual((thr["id"], thr["url"]), ("thr_firmware_unsupported", link))
+        self.assertTrue(thr["message"].endswith(" Update it."))
+        self.assertEqual(mainboard["id"], "mainboard_firmware_unsupported")
+        self.assertNotIn("url", mainboard)
+        # Only a link to this project's issue form, within GitHub's length, and a short note get through.
+        for url, note in (("https://example.invalid/thr", "x" * 301), ("javascript:alert(1)", ["list"]),
+                          (link + "x" * 7000, "line\nbreak"), (link + " onclick", None)):
+            with self.subTest(url=url[:40]):
+                (log_dir / "tltg_thr_firmware.json").write_text(json.dumps({"issue_url": url, "note": note}))
+                _, thr = self.warnings(calibrated, log_dir=log_dir)
+                self.assertNotIn("url", thr)
+                self.assertTrue(thr["message"].endswith("from Fluidd's Logs."))
+
+    def test_calibration_saved_before_a_thr_flash_asks_for_a_new_one(self) -> None:
+        calibrated = {"loaded": True, "unshaped_axes": "", "saved": True}
+        log_dir = temp_path("printer-warnings-")
+        (log_dir / "tltg_input_shaper_thr_flash.json").write_text('{"shaper_freq_x": "54.4", "shaper_freq_y": "36.2"}')
+        stale, = self.warnings(calibrated, log_dir=log_dir, saved={"x": 54.4, "y": 36.2})
+        self.assertEqual(stale["id"], "input_shaper_after_thr_firmware")
+        self.assertEqual(self.warnings(calibrated, log_dir=log_dir, saved={"x": 51.8, "y": 36.2}), [])
+
+    def test_pending_work_is_listed_while_klipper_runs(self) -> None:
+        from dataclasses import replace
+
+        from installer.runtime import valve_oil_status as status_file
+
+        data = temp_path("printer-warnings-data-")
+        paths = types.SimpleNamespace(printer_data_root=data)
+        globals_macro = _Status(variables={"package_version": "26.11.11.3"})
+
+        class Printer:
+            def get_printer(self):
+                return self
+
+            def get_start_args(self):
+                return {"config_file": str(data / "config/printer.cfg")}
+
+            def register_event_handler(self, event, handler):
+                pass
+
+            def lookup_object(self, name, default=None):
+                return globals_macro if name == "gcode_macro _tltg_optimized_globals" else default
+
+        warnings = printer_warnings.PrinterWarnings(Printer())
+        clock = [100.]
+
+        def pending():
+            clock[0] += printer_warnings.PENDING_POLL
+            return [w for w in warnings.get_status(clock[0])["warnings"] if w["id"].startswith("valve_oil_")]
+
+        def check(*items, enrolled=False):
+            status_file.record_check(paths, enrolled=enrolled, printer=status_file.PrinterInfo(),
+                                     installed_release="26.11.11.3", pending=items)
+
+        self.assertEqual(pending(), [])
+        # Automatic updates off: the installer has to be run.
+        check(status_file.PendingItem(kind="release", version="26.12.1.1"),
+              status_file.PendingItem(kind="board", board="thr"), status_file.PendingItem(kind="board", board="box2"))
+        release, boards = pending()
+        self.assertEqual((release["id"], release["level"]), ("valve_oil_release_waiting", "warning"))
+        self.assertIn("26.12.1.1", release["title"])
+        self.assertIn("run the Valve Oil installer", release["message"])
+        self.assertIn("the THR and Box 2", boards["title"])
+        # Automatic updates on: why it hasn't run, read again without a restart.
+        (data / ".tltg_optimized_auto_update_enrolled").write_text("1\n")
+        check(status_file.PendingItem(kind="firmware", version="01.01.07.01", blocked_by=(status_file.Blocker.of("printing"),)),
+              # The release Klipper already runs is no longer waiting.
+              status_file.PendingItem(kind="release", version="26.11.11.3"), enrolled=True)
+        firmware, = pending()
+        self.assertEqual(firmware["id"], "valve_oil_firmware_waiting")
+        self.assertIn(status_file.BLOCKERS["printing"], firmware["message"])
+        # The release Klipper runs, found with its installed state missing or drifted, has to be installed again.
+        check(status_file.PendingItem(kind="release", version="26.11.11.3", reinstall=True), enrolled=True)
+        reinstall, = pending()
+        self.assertEqual((reinstall["id"], reinstall["title"]),
+                         ("valve_oil_release_waiting", "Valve Oil needs to be installed again."))
+        check(status_file.PendingItem(kind="firmware", version="01.01.07.01", blocked_by=(status_file.Blocker.of("printing"),)),
+              enrolled=True)
+        # A run whose process is gone was interrupted.
+        status_file.begin_run(paths, kind="automatic", step="soc", step_label="Installing QIDI's firmware package")
+        status_file.update_status(paths, lambda current: replace(current, run=replace(current.run, pid=2 ** 22 + 1)))
+        interrupted, _ = pending()
+        self.assertEqual(interrupted["id"], "valve_oil_update_interrupted")
+        self.assertTrue(interrupted["message"].endswith(printer_warnings.FINISH_IT))
+        # A firmware update that failed partway and waits for the operator says where and what to run, and that Update
+        # now continues it too unless a board's rescue has to run first.
+        failed = status_file.begin_run(paths, kind="automatic", step="soc", step_label="Installing QIDI firmware",
+                                       firmware_update="fw-1")
+        status_file.finish_run(paths, failed.id, state=status_file.FAILED, message="dpkg failed. Run ./install.sh again.")
+        (data / ".tltg_firmware_update_pending.json").write_text('{"schema": 1, "id": "fw-1", "state": "failed"}')
+        alert = pending()[0]
+        self.assertEqual(alert["id"], "valve_oil_firmware_update_failed")
+        self.assertEqual(alert["message"], "It stopped at: Installing QIDI firmware. dpkg failed. Run ./install.sh again. "
+                         + printer_warnings.CONTINUE_IT)
+        (data / ".tltg_mainboard_firmware_pending.json").write_text("{}")
+        self.assertNotIn(printer_warnings.CONTINUE_IT, pending()[0]["message"])
+        for name in (".tltg_firmware_update_pending.json", ".tltg_mainboard_firmware_pending.json"):
+            (data / name).unlink()
+        # A corrupt or missing file lists nothing.
+        status_file.status_path(paths).write_text('{"schema": 1, "pending": [')
+        self.assertEqual(pending(), [])
+        status_file.remove_status(paths)
+        self.assertEqual(pending(), [])
 
     def test_input_shaper_states(self) -> None:
         self.assertEqual(self.warnings({"loaded": True, "unshaped_axes": "", "saved": True}), [])

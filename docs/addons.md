@@ -14,7 +14,7 @@ Tailscale puts the printer on your own private network, so your devices reach it
 
 Open Fluidd's **Settings** and go to **Add-ons**. Each add-on has an **Install** button. Installing takes about a minute and shows its progress, with the full log one click away. **Remove** asks first, then stops the add-on and deletes it with its settings.
 
-Add-ons can be installed or updated only while the printer isn't printing. One change runs at a time, and it keeps running if you close the page.
+Add-ons can be installed, updated, or relinked only while the printer isn't printing or running G-code such as a calibration, since building one takes CPU time and memory those need. A heater that is on doesn't stop it. One change runs at a time, and it keeps running if you close the page.
 
 Fluidd's **Add-ons** section talks to the printer it was opened from. Moonraker decides who may use it, the same way it does for Fluidd itself.
 
@@ -24,15 +24,15 @@ Each Valve Oil release pins the version of every add-on it offers. When you inst
 
 ## From SSH
 
-`~/tltg-optimized-macros/addons.sh` does the same from the command line:
+`~/valve-oil/addons.sh` does the same from the command line:
 
 ```bash
-~/tltg-optimized-macros/addons.sh list
-~/tltg-optimized-macros/addons.sh install octoeverywhere
-~/tltg-optimized-macros/addons.sh update octoeverywhere
-~/tltg-optimized-macros/addons.sh remove octoeverywhere
-~/tltg-optimized-macros/addons.sh relink obico --server http://192.168.1.10:3334
-~/tltg-optimized-macros/addons.sh install tailscale
+~/valve-oil/addons.sh list
+~/valve-oil/addons.sh install octoeverywhere
+~/valve-oil/addons.sh update octoeverywhere
+~/valve-oil/addons.sh remove octoeverywhere
+~/valve-oil/addons.sh relink obico --server http://192.168.1.10:3334
+~/valve-oil/addons.sh install tailscale
 ```
 
 `relink` is for Obico. See [Changing the server or unlinking](#changing-the-server-or-unlinking).

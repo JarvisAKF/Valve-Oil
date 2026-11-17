@@ -26,6 +26,28 @@ Box heater targets can be set from Fluidd, up to 65 °C, the Box's advertised ma
 
 Each Box's processor temperature shows in Fluidd's temperature card as **Box1 MCU** through **Box4 MCU**. These sensors have no limits, so they never stop a print.
 
+### Box heater switching speed
+
+To hold its target, the Box heater switches on and off 10 times a second, Klipper's default. If that makes lights on the same circuit flicker, it can switch faster, as `pwm_cycle_time` does for the bed and chamber heaters. QIDI's Box code takes no cycle time from `box.cfg`. In seconds, for every USB Box:
+
+```text
+SAVE_VARIABLE VARIABLE=vo_box_heater_pwm_cycle_time VALUE=0.02
+FIRMWARE_RESTART
+```
+
+It takes effect the next time Klipper restarts, a plain `RESTART` included. Values from `0.01` to `0.1` work; anything else, or no setting, keeps `0.1`. If you've shortened `pwm_cycle_time` for the bed or chamber, the same value is a good start. Switching faster doesn't change how much the heater heats. To go back, save `0.1` and restart Klipper. `klippy.log` shows the cycle each Box heater uses, for example `tltg_box_heater_refresh: heater_box1 switches every 0.02 s`. RS-485 Boxes aren't changed.
+
+### Turning spools while the Box heats
+
+With this turned on, while a Box's heater has a target, during a print or not, each of its empty slots turns its spool every 5 minutes, so the spool sits in the heat on a different side. The slot's motor, which also drives the roller under the spool, turns back 25 mm at 20 mm/s, one slot at a time. That's half as far as QIDI's drying turns the spools, and slower. A print doesn't pause or slow for it.
+
+- Only slots that are empty turn: QIDI's saved state for the slot is empty, and the slot's inlet sensor sees no filament. Put the spool on the rollers without feeding its filament. A slot with filament anywhere, parked at the hub or loaded to the toolhead, never turns.
+- The first turn comes 5 minutes after the heater comes on.
+- Nothing turns while the print is paused, while the Box loads, unloads, or changes tools, or while QIDI's own drying runs on that Box, which turns the spools itself.
+- It's off until you turn on **Turn spools while heating** in the QIDI Box card's settings in Fluidd, or run `SAVE_VARIABLE VARIABLE=vo_box_spool_roll VALUE=1`. `VALUE=0` turns it off again. The change applies at the next turn.
+
+`klippy.log` notes each turn, for example `tltg_box_spool_roll: turning 1A's spool 25 mm`.
+
 ## Load and unload speed
 
 A load pushes filament from the spool to the Box hub, then fast toward the toolhead, then slowly until the toolhead filament sensor trips. An unload has the extruder pull the filament back, the Box pull it back to the hub, and then back to its parked position.
@@ -60,6 +82,8 @@ The installer saves this project's defaults, unless you've already saved any of 
 | `UNLOAD_SPEED` | Speed back to the hub, in mm/s | QIDI's | 100 | 10–150 |
 | `UNLOAD_ACCEL` | Acceleration back to the hub | QIDI's | 50 | 20–400 |
 | `PARK_SPEED` | Speed from the hub back to the parked position, in mm/s | QIDI's | 80 | 10–150 |
+
+**Smart 5.** The settings are off on the Smart 5, whose Box loads and unloads at QIDI's values, until a Smart 5 Box load has been measured.
 
 ```gcode
 TLTG_BOX_MOTION HUB_SPEED=120 PARK_SPEED=120
@@ -234,13 +258,27 @@ Pausing turns the nozzle off. With the Box, **Resume** first moves the toolhead 
 
 When filament leaves the toolhead sensor during a print, Klipper waits for the command that's running to finish before it handles the runout. A Box unload inside a resume or the print-start load runs within one command, so its runout used to be handled minutes later, once the new filament was already loaded: the print paused and QIDI's auto-reload ran, or, if the print had been cancelled meanwhile, the idle printer paused, homed, and reported `Auto reload failed`. The runout is now handled only if the toolhead sensor still reports no filament and the print is still running unpaused; otherwise the console says `TLTG_FILAMENT_SENSOR: ignoring an earlier toolhead sensor trip` and nothing else happens.
 
+## Connecting, disconnecting, and moving Boxes
+
+QIDI's touchscreen app writes the USB Boxes into `box.cfg` and restarts Klipper whenever the Boxes it finds change. It counted a Box board resetting, which drops the Boxes off USB for a few seconds after a Klipper start or a Box firmware flash, as a change, so Klipper could restart several times in a row for nothing. The restart at the app's start didn't check for a print, and its restart turned the heaters off. It numbered the Boxes by USB port, so a Box moved to another port took another Box's number and slots.
+
+With Valve Oil, its Box monitor does this instead:
+
+- **A Box keeps its number,** and so its slots and tool mapping, on any USB port. The first install records each Box's number from `box.cfg` as it is, so nothing is renumbered.
+- **`box.cfg` changes only when the Boxes do.** About 5 seconds after a Box connects or disconnects and the Boxes stop changing, it writes `box.cfg` in QIDI's layout, and only when the file would be different. Boxes dropping off USB and coming back leave it as it is.
+- **A new Box** gets the lowest number no connected Box has. While a Box is disconnected, the Boxes after it move up, since `box.cfg` can't skip a number, and they get their numbers and slots back when it's connected again. Connecting a new Box instead takes the disconnected Box's number.
+- **Klipper restarts only while the printer is idle,** with no print running or paused and no heater on, and the heaters are never turned off for it. Otherwise a printer warning says `A USB Box was connected or disconnected.`, and Klipper restarts once the printer is idle.
+- **Installs and board firmware go first.** While the installer runs or a board's firmware is written or waits for its rescue, the monitor changes nothing, and catches up when that ends.
+
+The touchscreen still shows the Boxes, their firmware, and its Box notices. This applies to the touchscreen apps of Max 4 firmware `01.01.07.01` and Plus 5 and Smart 5 firmware `01.01.02.01`; with any other app, the app keeps managing `box.cfg` as before. A `box.cfg` you've edited, so it's no longer in QIDI's layout, is left as it is. Uninstall puts QIDI's app back, which writes `box.cfg` again when it next starts. RS-485 Boxes aren't in `box.cfg`, and aren't affected.
+
 ## Box disconnects
 
 See [Fixes](fixes.md#qidi-box-disconnects) for what this project changes, and [Troubleshooting](troubleshooting.md#box-link-monitor) to record why a Box drops.
 
 ## RS-485 Boxes
 
-QIDI's Max 4 firmware `01.01.07.01` and Plus 5 firmware `01.01.02.01` include support for Boxes, buffers, and filament racks that connect over RS-485 through a USB adapter, alongside the USB Boxes that run Klipper. This project hasn't been tested with RS-485 hardware yet, so it watches for it:
+QIDI's Max 4 firmware `01.01.07.01` and Plus 5 and Smart 5 firmware `01.01.02.01` include support for Boxes, buffers, and filament racks that connect over RS-485 through a USB adapter, alongside the USB Boxes that run Klipper. This project hasn't been tested with RS-485 hardware yet, so it watches for it:
 
 - **If you have RS-485 hardware,** the console asks you to open a [GitHub issue](https://github.com/thelegendtubaguy/valve-oil/issues) once per Klipper start. Attach `tltg_box485_report.json` and `tltg_box485.log` from the `logs` folder in Fluidd. The log records what QIDI's code sends to and receives from each device, and the report summarizes the setup. Chip ids and USB serial numbers are replaced with codes that can't be traced back to your hardware. Nothing about how the hardware works is changed.
 - **To write the report yourself,** run `TLTG_RS_BOX_REPORT`. It says whether RS-485 hardware was found.

@@ -53,7 +53,7 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("bundle smoke test is missing qidiclient static GIF archive")
     for printer in load_manifest(bundle_root / "installer/package.yaml").printers:
         for firmware in printer.firmware:
-            snapshot_root = bundle_root / "installer" / printer.stock_snapshots / firmware / "config"
+            snapshot_root = bundle_root / "installer" / printer.stock_snapshot(firmware) / "config"
             printer_config = snapshot_root / "printer.cfg"
             if not printer_config.exists():
                 raise SystemExit(f"bundle smoke test is missing {firmware} stock config snapshot")
@@ -130,7 +130,6 @@ def main(argv: list[str] | None = None) -> int:
         "--dry-run",
         "--demo-tui",
         "--yes",
-        "--flash-thr-fifo",
         "--disable-ai-detection",
         "--keep-ai-detection",
         "--keep-system-optimizations",
@@ -138,7 +137,7 @@ def main(argv: list[str] | None = None) -> int:
     ):
         if expected not in help_output.stdout:
             raise SystemExit(f"install.sh help output is missing {expected}")
-    for relative in ("scripts/flash_thr_firmware.py", "scripts/build_thr_firmware.py", "firmware/max4-thr-valve-oil-v1.json", "firmware/FLASHING.md"):
+    for relative in ("scripts/flash_thr_firmware.py", "scripts/build_thr_firmware.py", "firmware/max4-thr-valve-oil-v1.json", "firmware/smart5-thr-valve-oil-v1.json", "firmware/FLASHING.md"):
         if not (bundle_root / relative).is_file():
             raise SystemExit("bundle is missing THR firmware support: " + relative)
     tool_help = run_command([sys.executable, str(bundle_root / "scripts/flash_thr_firmware.py"), "--help"], cwd=bundle_root, env=os.environ.copy())
@@ -208,7 +207,7 @@ def main(argv: list[str] | None = None) -> int:
             for name in ("box_link_monitor", "box_mcu_temperature", "background_save_config",
                          "box_heater_refresh", "klipper_health", "macro_status", "printer_warnings", "klipper_fixes", "save_variables_fast",
                          "box_feed_motion", "box_eject", "box_filament_guard", "box_loaded_slot",
-                         "box_slot_jog", "box_rfid", "filament_catalog", "box_flow_recovery", "cold_cut",
+                         "box_slot_jog", "box_spool_roll", "box_rfid", "filament_catalog", "box_flow_recovery", "cold_cut",
                          "box485_monitor", "spoolman", "probe_test", "chamber_exhaust_guard", "step_loss_monitor", "velocity_limit",
                          "resonance_sweep", "pause_timeout", "probe_report", "bed_soak")
         }

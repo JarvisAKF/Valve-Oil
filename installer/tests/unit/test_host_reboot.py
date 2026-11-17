@@ -6,6 +6,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
+from installer.runtime import host_reboot
 from installer.runtime.host_reboot import (
     HostRebootError,
     arm_auto_update_reboot_followup,
@@ -14,6 +15,7 @@ from installer.runtime.host_reboot import (
     perform_scheduled_host_reboot,
     read_host_reboot_marker,
     recommend_reboot,
+    schedule_reboot_after_firmware_update,
     verify_completed_host_reboot,
     write_host_reboot_marker,
 )
@@ -93,7 +95,7 @@ class HostRebootTests(unittest.TestCase):
             )
         )
         self.assertIn("systemd-run", calls[1])
-        self.assertIn("--on-active=10s", calls[1])
+        self.assertIn("--on-active=5s", calls[1])
         self.assertNotIn("reboot", calls[1])
 
         calls.clear()
@@ -140,6 +142,40 @@ class HostRebootTests(unittest.TestCase):
                 )
                 self.assertEqual(calls, [])
                 self.assertTrue(self.paths.host_reboot_marker_path.exists())
+
+    def test_idle_check_reads_the_printer_again_when_klipper_goes_away_between_its_reads(self):
+        # QIDI's touchscreen app restarts Klipper as it starts; a read that fails meanwhile is not the answer.
+        from unittest import mock
+
+        from installer.runtime import safety
+        from installer.runtime.errors import HeaterOnError, PrinterStateError
+
+        def flaky(targets):
+            answers = moonraker_urlopen("standby", heater_targets=targets)
+            failed = []
+
+            def urlopen(request, timeout=0):
+                url = getattr(request, "full_url", str(request))
+                if "heater_bed" in url and not failed:
+                    failed.append(url)
+                    raise OSError("Klippy Disconnected")
+                return answers(request, timeout=timeout)
+
+            return urlopen
+
+        with mock.patch.object(safety.time, "sleep"):
+            with self.assertRaises(PrinterStateError):
+                safety.ensure_printer_idle(self.paths.moonraker_url, urlopen=flaky({"heater_bed": 0.0}))
+            self.assertEqual(
+                safety.ensure_printer_idle(
+                    self.paths.moonraker_url, urlopen=flaky({"heater_bed": 0.0}), wait_seconds=30.0
+                ),
+                "standby",
+            )
+            with self.assertRaises(HeaterOnError):
+                safety.ensure_printer_idle(
+                    self.paths.moonraker_url, urlopen=flaky({"heater_bed": 60.0}), wait_seconds=30.0
+                )
 
     def test_auto_update_arms_followup_without_rebooting(self):
         self.paths.bundle_root.mkdir(parents=True)
@@ -190,7 +226,7 @@ class HostRebootTests(unittest.TestCase):
         self.assertEqual(calls, [])
         # Otherwise it reboots without asking, delayed through complete-host-reboot.
         self.assertTrue(schedule()[0])
-        self.assertIn("--on-active=10s", calls[-1])
+        self.assertIn("--on-active=5s", calls[-1])
         self.assertIn("complete-host-reboot", calls[-1])
         calls.clear()
         self.assertFalse(
@@ -252,7 +288,7 @@ class HostRebootTests(unittest.TestCase):
                 ))
                 self.assertFalse(perform_scheduled_host_reboot(
                     self.paths, reporter=PlainReporter(io.StringIO()), environ={},
-                    require_klipper_idle=True, urlopen=urlopen, run=run,
+                    require_klipper_idle=True, urlopen=urlopen, run=run, **_Clock().seams(),
                 ))
                 self.assertEqual(calls, [])
 
@@ -267,6 +303,73 @@ class HostRebootTests(unittest.TestCase):
             require_klipper_idle=True, urlopen=klipper(), run=run,
         ))
         self.assertEqual(calls[-1][-2:], ["systemctl", "reboot"])
+
+    def test_scheduled_reboot_reads_a_printer_that_is_starting_again_for_a_few_minutes(self):
+        # After a QIDI firmware update the touchscreen app restarts Klipper several times as it finds the boards.
+        self._write_marker()
+        calls: list[list[str]] = []
+
+        def run(command, **kwargs):
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        def starting(reads_until_ready):
+            unreadable, ready = moonraker_urlopen(raw_payload={}), moonraker_urlopen("standby")
+            reads = []
+
+            def urlopen(request, timeout=0):
+                reads.append(request)
+                return (unreadable if len(reads) <= reads_until_ready else ready)(request, timeout=timeout)
+
+            return urlopen
+
+        clock = _Clock()
+        self.assertTrue(perform_scheduled_host_reboot(
+            self.paths, reporter=PlainReporter(io.StringIO()), environ={}, urlopen=starting(5), run=run,
+            **clock.seams()))
+        self.assertEqual(calls[-1][-2:], ["systemctl", "reboot"])
+        self.assertLess(clock.now, host_reboot.STATE_WAIT_SECONDS)
+
+        calls.clear()
+        clock = _Clock()
+        report = io.StringIO()
+        self.assertFalse(perform_scheduled_host_reboot(
+            self.paths, reporter=PlainReporter(report), environ={}, urlopen=starting(10 ** 6), run=run,
+            **clock.seams()))
+        self.assertEqual(calls, [])
+        self.assertGreaterEqual(clock.now, host_reboot.STATE_WAIT_SECONDS)
+        self.assertIn("could not be verified", report.getvalue())
+        self.assertTrue(self.paths.host_reboot_marker_path.exists())
+
+    def test_a_firmware_update_schedules_the_reboot_its_install_needs(self):
+        calls: list[list[str]] = []
+
+        def run(command, **kwargs):
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        self.assertFalse(schedule_reboot_after_firmware_update(self.paths, password="x", run=run))
+        self.assertEqual(calls, [])
+        for pending in (recommend_reboot, lambda paths: self._write_marker(source="auto_update_child")):
+            with self.subTest(pending=pending):
+                pending(self.paths)
+                self.assertTrue(schedule_reboot_after_firmware_update(self.paths, password="x", run=run))
+                self.assertIn("systemd-run", calls[-1])
+                self.assertIn("--on-active=5s", calls[-1])
+                self.assertEqual(calls[-1][-2:], ["complete-host-reboot", "--plain"])
+
+
+class _Clock:
+    """time.monotonic and time.sleep for a run that waits."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def seams(self):
+        return {"sleep": self._sleep, "clock": lambda: self.now}
+
+    def _sleep(self, seconds):
+        self.now += seconds
 
 
 if __name__ == "__main__":

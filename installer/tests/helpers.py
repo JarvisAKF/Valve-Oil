@@ -4,6 +4,7 @@ import atexit
 import dataclasses
 import hashlib
 import json
+import os
 import shutil
 import tempfile
 import threading
@@ -15,7 +16,7 @@ from pathlib import Path
 
 FIXTURES_ROOT = Path(__file__).resolve().parent / "fixtures"
 BASE_RUNTIME_FIXTURE = FIXTURES_ROOT / "runtime" / "base"
-from installer.runtime import qidiclient_firmware_popup
+from installer.runtime import klipper_chelper, qidiclient_firmware_popup
 from installer.runtime.manifest import load_manifest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -38,6 +39,14 @@ def homing_fixture_bytes(firmware: str) -> bytes:
             b"G4 P200SET_HOMING_MODE STEPPER=y VALUE=2",
         )
     return value
+
+
+def homing_smart5_fixture_bytes() -> bytes:
+    """QIDI's Smart 5 homing.py, rebuilt from the patched copy."""
+    return (REPO_ROOT / "installer/klipper/qidi/homing-smart5.py").read_bytes().replace(
+        b'self.toolhead.dwell(\r\n            .25 if rails[0].get_name() in ("stepper_x", "stepper_y")\r\n            else 1)',
+        b"self.toolhead.dwell(1)",
+    )
 
 
 def homing_sync_reset_fixture_bytes() -> bytes:
@@ -64,13 +73,21 @@ atexit.register(_cleanup_temp_roots)
 
 
 
-def copy_base_runtime() -> Path:
-    temp_root = temp_path("installer-runtime-")
+def copy_base_runtime(*, homing_patched: bool = False) -> Path:
+    """A Max 4 01.01.06.03 printer_data, in a home of its own where the installer keeps its caches beside it.
+
+    homing_patched: Klipper's homing.py already carries Valve Oil's patch, so an install has no source patch to apply
+    or restore. For tests about other parts of an install: with QIDI's homing.py every state write carries its
+    40 KB original, which makes up most of an install's time here. test_source_patch_lifecycle_matrix covers the patch.
+    """
+    temp_root = temp_path("installer-runtime-") / "printer_data"
     shutil.copytree(BASE_RUNTIME_FIXTURE / "config", temp_root / "config")
     shutil.copy2(BASE_RUNTIME_FIXTURE / "firmware_manifest.json", temp_root / "firmware_manifest.json")
     target = temp_root / "klipper/klippy/extras"
     target.mkdir(parents=True, exist_ok=True)
-    (target / "homing.py").write_bytes(homing_fixture_bytes("01.01.06.03"))
+    homing = (REPO_ROOT / "installer/klipper/qidi/homing.py").read_bytes() if homing_patched else (
+        homing_fixture_bytes("01.01.06.03"))
+    (target / "homing.py").write_bytes(homing)
     return temp_root
 
 
@@ -85,15 +102,36 @@ def build_env(printer_data_root: Path, *, moonraker_url: str) -> dict[str, str]:
 
 
 
-def fake_qidiclient() -> tuple[bytes, bytes]:
-    # A small stand-in for QIDI's touchscreen executable and its patched form, admitted as a reviewed build.
+def fake_qidiclient(variant: int = 0) -> tuple[bytes, bytes, bytes]:
+    # A small stand-in for QIDI's touchscreen executable, admitted as a reviewed build, with its patched forms with and
+    # without QIDI's package updates blocked. Each variant is a different build of the same size.
     popup = qidiclient_firmware_popup
-    stock = b"\x7fELF\xff\xfe" + bytes(58) + popup.BRANCH_IF_EQUAL + bytes(64) + popup.BRANCH_IF_EQUAL + bytes(60)
-    patched = stock.replace(popup.BRANCH_IF_EQUAL, popup.BRANCH_IF_NOT_LONGER)
-    popup.BUILDS[hashlib.sha256(stock).hexdigest()] = popup.Build(
-        size=len(stock), patched_sha256=hashlib.sha256(patched).hexdigest(), branches=(64, 132),
+    stock = (
+        b"\x7fELF\xff\xfe" + bytes([variant]) + bytes(57) + popup.BRANCH_IF_EQUAL + bytes(64) + popup.BRANCH_IF_EQUAL + bytes(60)
+        + popup.STORE_NEED_UPDATE + bytes(28) + popup.EXTRACT_PROLOGUE + bytes(24) + popup.DETECTOR_CHANGED + bytes(12)
     )
-    return stock, patched
+    sites = (
+        popup.Site(64, popup.BRANCH_IF_EQUAL, popup.BRANCH_IF_NOT_LONGER),
+        popup.Site(132, popup.BRANCH_IF_EQUAL, popup.BRANCH_IF_NOT_LONGER),
+        popup.Site(196, popup.STORE_NEED_UPDATE, popup.STORE_ZERO, blocking=True),
+        popup.Site(228, popup.EXTRACT_PROLOGUE, popup.RETURN_FALSE, retired=True),
+        popup.Site(260, popup.DETECTOR_CHANGED, popup.DETECTOR_UNCHANGED),
+    )
+    unblocked = stock.replace(popup.BRANCH_IF_EQUAL, popup.BRANCH_IF_NOT_LONGER).replace(
+        popup.DETECTOR_CHANGED, popup.DETECTOR_UNCHANGED)
+    blocked = unblocked.replace(popup.STORE_NEED_UPDATE, popup.STORE_ZERO)
+    popup.BUILDS[hashlib.sha256(stock).hexdigest()] = popup.Build(
+        size=len(stock), sites=sites,
+        patched_sha256=hashlib.sha256(unblocked).hexdigest(), blocked_sha256=hashlib.sha256(blocked).hexdigest(),
+        other_blocked_sha256=(hashlib.sha256(earlier_blocked_qidiclient(blocked)).hexdigest(),),
+    )
+    return stock, blocked, unblocked
+
+
+def earlier_blocked_qidiclient(blocked: bytes) -> bytes:
+    # The blocked form development builds wrote, which also stopped QIDI's USB and mandatory-file updates.
+    popup = qidiclient_firmware_popup
+    return blocked.replace(popup.EXTRACT_PROLOGUE, popup.RETURN_FALSE)
 
 
 def fake_system_root(
@@ -103,6 +141,7 @@ def fake_system_root(
     include_filament_config: bool = False,
     include_klipper_box_config: bool = False,
     include_klipper_print_stats_manager: bool = False,
+    include_klipper_chelper: bool = False,
     include_nginx_site: bool = False,
     include_moonraker_asvc: bool = False,
     include_moonraker_metadata: bool = False,
@@ -153,6 +192,15 @@ def fake_system_root(
         stats_manager = root / "home/qidi/klipper/klippy/extras/print_stats_manager.py"
         stats_manager.parent.mkdir(parents=True, exist_ok=True)
         stats_manager.write_bytes((REPO_ROOT / "installer/tests/fixtures/klipper_print_stats_manager.py").read_bytes().replace(b"\n", b"\r\n"))
+    if include_klipper_chelper:
+        # QIDI's library beside a source file from the same firmware, which QIDI ships with the library's time.
+        library = root / klipper_chelper.FILE.lstrip("/")
+        library.parent.mkdir(parents=True)
+        shutil.copyfile(klipper_chelper.PAYLOAD_DIR / "qidi_c_helper.so", library)
+        source = library.parent / "kin_extruder.c"
+        source.write_text("// QIDI's source\n", encoding="utf-8")
+        for path in (library, source):
+            os.utime(path, (1_786_959_581, 1_786_959_581))
     if include_nginx_site:
         site = root / "etc/nginx/sites-available/fluidd"
         site.parent.mkdir(parents=True)
@@ -307,7 +355,7 @@ def fake_host_run(root: Path):
             state["active"] = "active" if command[1] == "start" else "inactive"
             write_service_state(service, state)
             return result(command)
-        if command[:2] == ["systemctl", "restart"]:
+        if command[:2] in (["systemctl", "restart"], ["systemctl", "try-restart"]):
             return result(command)
         if command[:2] == ["systemctl", "daemon-reload"] or command[:2] == ["systemctl", "reset-failed"]:
             return result(command)

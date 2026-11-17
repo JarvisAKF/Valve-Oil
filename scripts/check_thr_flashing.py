@@ -191,6 +191,11 @@ class Peer:
         return len(raw)
 
 
+def run_tool(manifest, arguments):
+    """The flashing tool's main with the THR manifest the images belong to."""
+    return tool.main([*arguments, "--manifest", manifest["patch_id"] + ".json"])
+
+
 def check_admission(stock, patched, boot, manifest, profile):
     with tempfile.TemporaryDirectory(prefix="thr-transfer-check-") as temporary:
         root = Path(temporary)
@@ -215,7 +220,16 @@ def check_admission(stock, patched, boot, manifest, profile):
             for args in cases:
                 with patch.object(tool.subprocess, "run", side_effect=AssertionError("Admission opened service access")):
                     with contextlib.redirect_stderr(io.StringIO()):
-                        assert tool.main(args) == 1
+                        assert run_tool(manifest, args) == 1
+            # A transfer for a target firmware programs only the image pinned for it or QIDI's stock image.
+            pinned = next(firmware for firmware, build in manifest["targets"].items() if build == "patched")
+            for firmware, image_path, reaches in (("09.09.09.09", patched_path, False), ("09.09.09.09", stock_path, False),
+                                                   (pinned, patched_path, True), (pinned, stock_path, True)):
+                with patch.object(tool, "require_ownership", side_effect=ValueError("stop before UART")) as ownership:
+                    with contextlib.redirect_stderr(io.StringIO()):
+                        assert run_tool(manifest, ["transfer", "--image", str(image_path), "--confirm-write", "--backup-dir",
+                                          str(backup), "--printer-idle-confirmed", "--firmware", firmware]) == 1
+                assert ownership.called == reaches, (firmware, image_path.name)
             result = tool.verify_readback(stock, backup, manifest)
             assert result["verified"]
             try:
@@ -231,14 +245,14 @@ def check_admission(stock, patched, boot, manifest, profile):
                 try:
                     with patch.object(tool.subprocess, "run", side_effect=AssertionError("Invalid backup opened service access")):
                         with contextlib.redirect_stderr(io.StringIO()):
-                            assert tool.main(["transfer", "--image", str(patched_path), "--confirm-write",
+                            assert run_tool(manifest, ["transfer", "--image", str(patched_path), "--confirm-write",
                                               "--backup-dir", str(backup), "--printer-idle-confirmed"]) == 1
                 finally:
                     target.write_bytes(original)
             for state in ("active", "activating", "deactivating", "failed", ""):
                 with patch.object(tool.subprocess, "run", return_value=type("Result", (), {"stdout": state, "returncode": 0})()):
                     with contextlib.redirect_stderr(io.StringIO()):
-                        assert tool.main(["transfer", "--image", str(patched_path), "--confirm-write",
+                        assert run_tool(manifest, ["transfer", "--image", str(patched_path), "--confirm-write",
                                           "--backup-dir", str(backup), "--printer-idle-confirmed"]) == 1
 
             def absent_timer(command, **kwargs):
@@ -254,7 +268,7 @@ def check_admission(stock, patched, boot, manifest, profile):
                     arguments += ["--image", str(patched_path), "--confirm-write"]
                 with patch.object(tool.subprocess, "run", side_effect=AssertionError("Unadmitted backup opened services/UART")):
                     with contextlib.redirect_stderr(io.StringIO()):
-                        assert tool.main(arguments) == 1
+                        assert run_tool(manifest, arguments) == 1
             try:
                 tool.verify_readback(stock, backup, manifest)
             except ValueError:
@@ -268,7 +282,8 @@ def check_capture(stock, boot, manifest):
     commands = []
     addresses = []
     constants = {"MCU": "stm32f103xe", "SERIAL_BAUD": 500000, "CLOCK_FREQ": 72000000}
-    parser = SimpleNamespace(get_constants=lambda: constants, get_version_info=lambda: ("vendor", "build"))
+    parser = SimpleNamespace(get_constants=lambda: constants, get_version_info=lambda: ("vendor", "build"),
+                             create_command=lambda text: text)
 
     class Loop:
         def register_callback(self, callback):
@@ -280,22 +295,36 @@ def check_capture(stock, boot, manifest):
         def finalize(self):
             pass
 
+    def answer(command):
+        commands.append(command)
+        _, order, address = command.split()
+        address, order = int(address.split("=")[1]), int(order.split("=")[1])
+        addresses.append(address)
+        if address in (0xe000ed00, 0xe0042000, 0x1ffff7e0):
+            return {"val": {0xe000ed00: 0x410fc241, 0xe0042000: 0x21040414, 0x1ffff7e0: 128}[address]}
+        assert order == 2 and 0x08000000 <= address <= 0x0801fffc, "Read escaped flash/ID-register allowlist"
+        return {"val": int.from_bytes(flash[address - 0x08000000:address - 0x08000000 + 4], "little")}
+
     class Reader:
+        # The reads klipper_debug_read sends many at a time arrive through the registered debug_result handler.
+        reactor = SimpleNamespace(monotonic=lambda: 0.0, pause=lambda waketime: waketime)
+
         def __init__(self, loop):
-            pass
+            self.handlers = {}
         def _start_session(self, port):
             return True
         def get_msgparser(self):
             return parser
+        def get_default_command_queue(self):
+            return None
+        def register_response(self, callback, name):
+            self.handlers[name] = callback
+        def raw_send(self, command, minclock, reqclock, queue):
+            if not command.startswith("debug_read "):
+                raise AssertionError("Capture sent a reset or write command: " + command)
+            self.handlers["debug_result"](answer(command))
         def send_with_response(self, command, response):
-            commands.append(command)
-            _, order, address = command.split()
-            address, order = int(address.split("=")[1]), int(order.split("=")[1])
-            addresses.append(address)
-            if address in (0xe000ed00, 0xe0042000, 0x1ffff7e0):
-                return {"val": {0xe000ed00: 0x410fc241, 0xe0042000: 0x21040414, 0x1ffff7e0: 128}[address]}
-            assert order == 2 and 0x08000000 <= address <= 0x0801fffc, "Read escaped flash/ID-register allowlist"
-            return {"val": int.from_bytes(flash[address - 0x08000000:address - 0x08000000 + 4], "little")}
+            return answer(command)
         def send(self, command):
             raise AssertionError("Capture sent a reset or write command: " + command)
         def disconnect(self):
@@ -307,7 +336,7 @@ def check_capture(stock, boot, manifest):
         directory = Path(temporary) / "capture"
         with patch.object(tool.subprocess, "run", return_value=SimpleNamespace(stdout="inactive", returncode=0)):
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                status = tool.main(["snapshot", "--output-dir", str(directory), "--printer-idle-confirmed"])
+                status = run_tool(manifest, ["snapshot", "--output-dir", str(directory), "--printer-idle-confirmed"])
         supported = tool.digest(boot) in tool.thr_bootloaders.ADMITTED_BOOTLOADERS
         assert status == (0 if supported else tool.UNSUPPORTED_BOOTLOADER)
         assert len(commands) == len(set(commands)) and addresses
@@ -460,8 +489,10 @@ def main():
     parser.add_argument("--patched-image", required=True, type=Path)
     parser.add_argument("--bootloader-backup", type=Path, action="append", default=[],
                         help="captured image; repeat to check multiple exact profiles")
+    parser.add_argument("--manifest", default=tool.MANIFEST.name, choices=tool.MANIFESTS,
+                        help="THR manifest in firmware/ the images belong to (default: Max 4 and Plus 5)")
     args = parser.parse_args()
-    manifest = json.loads(tool.MANIFEST.read_text())
+    manifest = json.loads((tool.FIRMWARE / args.manifest).read_text())
     stock, patched = args.stock_image.read_bytes(), args.patched_image.read_bytes()
     assert tool.admitted_image(stock, manifest) == manifest["thr"]["stock_sha256"]
     assert tool.admitted_image(patched, manifest) == manifest["thr"]["patched_sha256"]

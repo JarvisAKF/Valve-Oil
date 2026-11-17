@@ -43,5 +43,5 @@ jobs:
           make_latest: false
           overwrite_files: true
           files: |
-            dist/tltg-optimized-macros-dev.tar.gz
-            dist/tltg-optimized-macros-dev.tar.gz.sha256
+            dist/valve-oil-dev.tar.gz
+            dist/valve-oil-dev.tar.gz.sha256

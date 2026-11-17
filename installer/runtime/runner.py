@@ -6,12 +6,14 @@ import urllib.request
 from dataclasses import replace
 
 from .addons_cli import maybe_update_installed_addons
-from . import klipper_cfg, messages, patches, safety
+from . import boot_logo, klipper_cfg, messages, patches, safety
 from .auto_update import (
     LOCK_HELD_ENV,
+    adopt_legacy_enrollment,
     maybe_prompt_enable_auto_updates,
-    maybe_repair_configured_auto_updates,
+    settle_installed_bundle,
 )
+from .board_firmware import UNADMITTED_STATES
 from .box_enablement import (
     maybe_initialize_box_motion,
     maybe_initialize_filament_retention,
@@ -41,7 +43,7 @@ from .compatibility import (
 from .config_transaction import FileChangePlan, apply_file_change_plan
 from .errors import PreviousPackageValidationError
 from .firmware import detect_supported_firmware
-from .host_reboot import arm_auto_update_reboot_followup
+from .host_reboot import arm_auto_update_reboot_followup, reboot_pending
 from .interaction import (
     maybe_restart_klipper,
     maybe_restart_pending_service_if_idle,
@@ -92,6 +94,7 @@ from .state_file import StateValidationError, load_installed_state, write_instal
 from .system_optimizations import (
     discard_legacy_system_ledger_migration,
     finalize_legacy_system_ledger_migration,
+    load_carried_system_ledger,
     maybe_apply_system_optimizations,
     maybe_emit_system_dry_run,
     migrate_legacy_system_ledger,
@@ -100,8 +103,23 @@ from .system_optimizations import (
     validate_legacy_system_ledger,
     validate_system_ledger,
 )
-from .thr_firmware import confirm_thr_firmware
 
+
+def block_qidi_package_updates(admission) -> bool | None:
+    """The block_qidi_updates value for system optimizations, from this printer's boards (board_firmware.BoardAdmission).
+
+    True blocks QIDI's package updates once the THR and the mainboard have been read: whether this release admits them
+    or a read found one it doesn't, which keeps a QIDI update from taking the printer to firmware no release supports
+    while the operator's support issue is open. None keeps the touchscreen app as it is (blocked stays blocked;
+    otherwise not blocked): nothing is known, because a board wasn't read this run and has no earlier record, or there
+    is no admission record at all. Nothing switches QIDI's updater back on but uninstall.
+    """
+    if admission is None:
+        return None
+    boards = [status for status in admission.boards if status.kind != "box"]
+    if all(status.admitted or status.state in UNADMITTED_STATES for status in boards):
+        return True
+    return None
 
 
 def _replace_legacy_system_ledger(state, ledger):
@@ -119,9 +137,10 @@ def run_install(
     disk_usage=shutil.disk_usage,
     environ: dict[str, str] | None = None,
     system_options: SystemOptimizationCliOptions | None = None,
-    flash_thr_fifo: bool = False,
+    block_qidi_updates: bool | None = True,
     run=None,
 ) -> InstallResult:
+    """block_qidi_updates: the caller's block_qidi_package_updates() decision for this printer's boards."""
     run = subprocess.run if run is None else run
     env = {} if environ is None else environ
     system_options = system_options or SystemOptimizationCliOptions()
@@ -216,14 +235,6 @@ def run_install(
             )
         except (CompatibilityValidationError, SourcePatchError) as exc:
             raise PreviousPackageValidationError() from exc
-    flash_thr_firmware = confirm_thr_firmware(
-        paths=paths,
-        reporter=reporter,
-        explicit=flash_thr_fifo,
-        dry_run=dry_run,
-        input_stream=input_stream,
-        environ=env,
-    )
     source_results = tuple(
         classify_install_source_patch(paths=paths, patch=patch, firmware=detected_firmware, prior_state=prior_state)
         for patch in manifest.install.source_patches
@@ -299,7 +310,6 @@ def run_install(
             backup_label=plan.backup_label,
             backup_zip_path=None,
             dry_run=True,
-            flash_thr_firmware=flash_thr_firmware,
         )
         reporter.emit_install_dry_run(plan=plan)
         maybe_emit_system_dry_run(
@@ -309,8 +319,10 @@ def run_install(
             prior_state=prior_state,
             cli_options=system_options,
             environ=env,
+            block_qidi_updates=block_qidi_updates,
             run=run,
         )
+        reporter.line(boot_logo.dry_run_line())
         reporter.debug(event="install.complete", dry_run=True, backup_label=plan.backup_label)
         return result
 
@@ -329,9 +341,10 @@ def run_install(
         system_options=system_options,
         source_results=source_results,
         config_changes=config_changes,
+        block_qidi_updates=block_qidi_updates,
         run=run,
     )
-    return replace(result, flash_thr_firmware=flash_thr_firmware)
+    return result
 
 
 
@@ -399,6 +412,7 @@ def _execute_install(
     system_options: SystemOptimizationCliOptions,
     source_results=(),
     config_changes=(),
+    block_qidi_updates: bool | None = True,
     run=subprocess.run,
 ) -> InstallResult:
     state_path = paths.printer_data_root / manifest.state_file
@@ -552,7 +566,10 @@ def _execute_install(
             system_ledger=(
                 prior_state.system_ledger
                 if prior_state is not None and prior_state.system_ledger and prior_state.system_ledger.get("restore_preimages")
-                else None
+                # QIDI's package deleted the state file of the install a firmware update replaced; that update
+                # kept its system ledger, so what that install changed on the host can still be undone.
+                else load_carried_system_ledger(paths, manifest=manifest, environ=environ, run=run)
+                if prior_state is None else None
             ),
         )
         journal.note_write()
@@ -563,6 +580,8 @@ def _execute_install(
         install_counters["state_write"][0] = 1
         reporter.emit_install_counters(**_freeze_counters(install_counters))
 
+        # Units an earlier release wrote only for automatic updates mean they are on, before this install replaces them.
+        adopt_legacy_enrollment(paths, environ)
         state = maybe_apply_system_optimizations(
             paths=paths,
             manifest=manifest,
@@ -573,9 +592,11 @@ def _execute_install(
             cli_options=system_options,
             environ=environ,
             auto_update_child=environ.get(LOCK_HELD_ENV) == "1",
+            block_qidi_updates=block_qidi_updates,
             run=run,
             urlopen=urlopen,
         )
+        boot_logo.install(paths, reporter=reporter, environ=environ, input_stream=input_stream, run=run)
     except BaseException as exc:
         reporter.debug(
             event="install.failure",
@@ -610,20 +631,14 @@ def _execute_install(
         environ=environ,
         run=run,
     )
-    if not maybe_repair_configured_auto_updates(
+    # The update check runs the bundle in the printer user's home; it is this one from now on.
+    settle_installed_bundle(paths, environ)
+    maybe_prompt_enable_auto_updates(
         paths=paths,
         reporter=reporter,
         input_stream=input_stream,
         environ=environ,
-        urlopen=urlopen,
-    ):
-        maybe_prompt_enable_auto_updates(
-            paths=paths,
-            reporter=reporter,
-            input_stream=input_stream,
-            environ=environ,
-            urlopen=urlopen,
-        )
+    )
     if klipper_halted:
         _restart_halted_klipper_and_update_saved_variables(
             paths=paths,
@@ -644,6 +659,10 @@ def _execute_install(
         )
         if restarted:
             verify_pending_saved_variable_expectations(paths, urlopen=urlopen)
+    elif environ.get(safety.FIRMWARE_UPDATE_RUN_ENV) and reboot_pending(paths):
+        # The firmware update reboots the printer when it ends (firmware_update._end_succeeded), which starts Klipper
+        # with the installed configuration.
+        reporter.line("Klipper starts with the new configuration when the printer restarts.")
     else:
         maybe_restart_klipper(
             paths=paths,
@@ -661,7 +680,9 @@ def _execute_install(
             [item for item in result.patch_results if item.classification == patches.USER_MODIFIED]
         ),
     )
-    if environ.get(LOCK_HELD_ENV) == "1":
+    # An automatic update reboots from a check once it has recorded the release; a QIDI firmware update reboots when
+    # it ends (firmware_update._end_succeeded).
+    if environ.get(LOCK_HELD_ENV) == "1" and not environ.get(safety.FIRMWARE_UPDATE_RUN_ENV):
         arm_auto_update_reboot_followup(
             paths,
             reporter=reporter,
