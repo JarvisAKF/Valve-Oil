@@ -51,7 +51,7 @@ from .box_firmware import usb_path_for_serial
 from . import closed_loop_firmware
 from .closed_loop_firmware import DriverUpdateFailed, KlipperAPI, klipper_api_path
 from .errors import ActivePrintError, FirmwareDetectionError, HeaterOnError, InstallerError, PrinterStateError
-from .firmware import detect_firmware, detect_firmware_version_best_effort, supported_printer
+from .firmware import detect_firmware, detect_firmware_key_best_effort, supported_printer
 from .fs_atomic import atomic_delete, atomic_write_text
 from .mainboard_firmware import mainboard_serial
 from .manifest import load_manifest
@@ -294,7 +294,8 @@ def firmware_update_plan(paths, *, manifest=None, admission=None, urlopen=urllib
     if printer is None:
         return FirmwareUpdatePlan(None, detected.version, None, False, pending=pending)
     target = printer.target_firmware
-    needed = target.can_update_from(detected.version)
+    installed_key = printer.firmware_key(detected.version)
+    needed = target.can_update_from(installed_key)
     admission = load_board_admission(paths) if admission is None else admission
     blockers: list[Blocker] = []
     if pending is not None:
@@ -318,8 +319,8 @@ def firmware_update_plan(paths, *, manifest=None, admission=None, urlopen=urllib
         blockers.extend(printer_blockers(paths, urlopen=urlopen))
     boards = tuple(status.label for status in (admission.boards if admission else ()) if status.state == NEEDS_IMAGE)
     return FirmwareUpdatePlan(
-        printer=printer, installed=detected.version, target=target.version, needed=needed, blockers=tuple(blockers),
-        boards=boards, closed_loop=needed and target.changes_board("closed_loop", detected.version),
+        printer=printer, installed=installed_key, target=target.version, needed=needed, blockers=tuple(blockers),
+        boards=boards, closed_loop=needed and target.changes_board("closed_loop", installed_key),
         download_bytes=target.size - downloaded, free_bytes_needed=needed_bytes, pending=pending)
 
 
@@ -1099,8 +1100,10 @@ def _stranded_mainboard(ctx, detail: str, *, outcome: str | None = None) -> _Fai
     earlier version than the new Klipper needs. In the second case the touchscreen comes back too, since QIDI's own
     board update from its firmware page can still fix the mainboard."""
     from scripts.build_box_firmware import board_spec, predecessor_versions
-    from .board_images import load_board_manifest
+    from .board_images import load_board_manifest, managed_boards
 
+    if "mcu" not in managed_boards(ctx.paths.bundle_root, ctx.printer):
+        return None
     if ctx.resolve_usb(mainboard_serial(ctx.paths)) is None:
         return _Failed(f"The mainboard was not found on USB, so its firmware wasn't updated ({detail}). Klipper and "
                        "Moonraker were started again; check that the printer is fully powered, then run ./install.sh "
@@ -1109,7 +1112,7 @@ def _stranded_mainboard(ctx, detail: str, *, outcome: str | None = None) -> _Fai
     status = admission.board("mcu") if admission is not None else None
     version = status.version if status is not None else None
     if outcome != "waiting" and version is not None and version not in predecessor_versions(
-            board_spec(load_board_manifest(ctx.paths.bundle_root, "mcu"))):
+            board_spec(load_board_manifest(ctx.paths.bundle_root, "mcu", ctx.printer))):
         return None
     return _Failed(
         f"The mainboard still runs firmware {version or 'of an unknown version'}, which the Klipper in QIDI firmware "
@@ -1124,7 +1127,7 @@ def _stranded_mainboard(ctx, detail: str, *, outcome: str | None = None) -> _Fai
 def _check(ctx: _Run) -> None:
     if ctx.changed():
         return
-    installed = detect_firmware_version_best_effort(ctx.paths.firmware_manifest_path)
+    installed = detect_firmware_key_best_effort(ctx.paths.firmware_manifest_path, ctx.manifest)
     if installed != ctx.record["from_firmware"] or not ctx.target.can_update_from(installed or ""):
         raise _NotStarted(f"the printer's firmware is now {installed}, not {ctx.record['from_firmware']}",
                           "run_failed")
@@ -1173,7 +1176,7 @@ def _stage(ctx: _Run):
         if ctx.changed():
             raise InstallerError(message) from exc
         raise _NotStarted(message, getattr(exc, "code", qidi_package.UNVERIFIED)) from exc
-    expected = {"Package": f"qd-{ctx.printer.id}-system", "Version": ctx.target.version, "Architecture": "arm64"}
+    expected = {"Package": ctx.printer.soc_package, "Version": ctx.target.soc_version, "Architecture": "arm64"}
     if any(fields.get(key) != value for key, value in expected.items()):
         message = f"QIDI's SOC package is {fields}, not {expected}"
         if ctx.changed():
@@ -1420,7 +1423,7 @@ def _soc(ctx: _Run) -> None:
     query = ctx.run(["dpkg-query", "-W", "-f=${Status}\t${Version}", ctx.record["package"]], capture_output=True,
                     text=True, timeout=60)
     installed = (query.stdout or "").strip()
-    if result.returncode or installed != f"install ok installed\t{ctx.target.version}":
+    if result.returncode or installed != f"install ok installed\t{ctx.target.soc_version}":
         raise InstallerError(f"dpkg exited with {result.returncode} and the package is '{installed}'")
     # A Klipper restart the installer was waiting for applied to Klipper files QIDI's package has just replaced, so
     # it can no longer be verified; the installer run below patches the new files and asks for its own restart.

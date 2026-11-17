@@ -53,7 +53,7 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("bundle smoke test is missing qidiclient static GIF archive")
     for printer in load_manifest(bundle_root / "installer/package.yaml").printers:
         for firmware in printer.firmware:
-            snapshot_root = bundle_root / "installer" / printer.stock_snapshots / firmware / "config"
+            snapshot_root = bundle_root / "installer" / printer.stock_snapshot(firmware) / "config"
             printer_config = snapshot_root / "printer.cfg"
             if not printer_config.exists():
                 raise SystemExit(f"bundle smoke test is missing {firmware} stock config snapshot")
@@ -137,7 +137,7 @@ def main(argv: list[str] | None = None) -> int:
     ):
         if expected not in help_output.stdout:
             raise SystemExit(f"install.sh help output is missing {expected}")
-    for relative in ("scripts/flash_thr_firmware.py", "scripts/build_thr_firmware.py", "firmware/max4-thr-valve-oil-v1.json", "firmware/FLASHING.md"):
+    for relative in ("scripts/flash_thr_firmware.py", "scripts/build_thr_firmware.py", "firmware/max4-thr-valve-oil-v1.json", "firmware/smart5-thr-valve-oil-v1.json", "firmware/FLASHING.md"):
         if not (bundle_root / relative).is_file():
             raise SystemExit("bundle is missing THR firmware support: " + relative)
     tool_help = run_command([sys.executable, str(bundle_root / "scripts/flash_thr_firmware.py"), "--help"], cwd=bundle_root, env=os.environ.copy())

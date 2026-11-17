@@ -13,7 +13,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from installer.runtime.backup import requires_external_backup_manifest
-from installer.runtime.board_images import BOARD_MANIFESTS, pinned_board_image, validate_board_targets
+from installer.runtime.board_images import BOARD_MANIFESTS, managed_boards, pinned_board_image, validate_board_targets
 from installer.runtime.cli import resolve_runtime_paths
 from installer.runtime.compatibility import (
     CompatibilityValidationError,
@@ -57,10 +57,10 @@ class InstallerCompatibilityTests(unittest.TestCase):
         ).hexdigest()
         self.assertEqual(self.envelope.schema_version, 2)
         self.assertEqual(len(self.envelope.allowed_patch_targets), 35)
-        self.assertEqual(len(self.envelope.source_patches), 6)
+        self.assertEqual(len(self.envelope.source_patches), 7)
         self.assertEqual(
             digest,
-            "cb249eee59881c469faa939ebb6e1888b2246c0053d698c080cb0773f669cfe1",
+            "60b0baf96dfca7a144e96bb11e9db686b250aad06f8b5e6aeab51cf009c3610b",
         )
 
     def test_manifest_rejects_printers_that_share_an_identity(self) -> None:
@@ -70,7 +70,10 @@ class InstallerCompatibilityTests(unittest.TestCase):
         max4 = raw["printers"][0]
         shared_firmware = {**max4, "id": "other", "soc_file_prefix": "QD_OTHER_SOC_", "firmware": [max4["firmware"][-1]]}
         shared_prefix = {**max4, "id": "other", "soc_file_prefix": "QD_MAX4_", "firmware": ["09.09.09.09"]}
-        for other in (shared_firmware, shared_prefix):
+        # A printer whose versions repeat another's must key every firmware with its prefix.
+        unkeyed = {**max4, "id": "other", "soc_file_prefix": "QD_OTHER_SOC_", "firmware_key_prefix": "other-",
+                   "firmware": ["other-09.09.09.09", "09.09.09.08"]}
+        for other in (shared_firmware, shared_prefix, unkeyed):
             with self.subTest(other=other["soc_file_prefix"]):
                 with self.assertRaises(ManifestValidationError):
                     parse_manifest({**raw, "printers": [max4, other]})
@@ -108,14 +111,22 @@ class InstallerCompatibilityTests(unittest.TestCase):
 
     def test_board_images_are_pinned_for_each_target_firmware(self) -> None:
         validate_board_targets(self.manifest, REPO_ROOT)
-        for printer in self.manifest.printers:
-            closed_loop = printer.target_firmware.board_version("closed_loop") is not None
-            self.assertEqual({board: pinned_board_image(REPO_ROOT, printer, board).is_project_build for board in BOARD_MANIFESTS},
-                             {"thr": True, "box": True, "mcu": closed_loop})
+        # THR and Box get this project's build everywhere; the mainboard build only with closed-loop drivers, and the
+        # Smart 5's i.MX RT mainboard is not managed.
+        expected = {"max4": {"thr": True, "box": True, "mcu": True}, "plus5": {"thr": True, "box": True, "mcu": False},
+                    "smart5": {"thr": True, "box": True}}
+        self.assertEqual({printer.id: {board: pinned_board_image(REPO_ROOT, printer, board).is_project_build
+                                       for board in managed_boards(REPO_ROOT, printer)}
+                          for printer in self.manifest.printers}, expected)
+        smart5 = next(printer for printer in self.manifest.printers if printer.id == "smart5")
+        with self.assertRaises(ValueError):
+            pinned_board_image(REPO_ROOT, smart5, "mcu")
         plus5 = next(printer for printer in self.manifest.printers if printer.target_firmware.board_version("closed_loop") is None)
         changes = {
             "mainboard build without closed-loop drivers": ("mcu", lambda m: m["targets"].update({plus5.target_firmware.version: "patched"})),
             "no image for a target": ("thr", lambda m: m["targets"].pop(plus5.target_firmware.version)),
+            "two images for a target": ("thr", lambda m: m["targets"].update({smart5.target_firmware.version: "patched"})),
+            "image for firmware no printer targets": ("box", lambda m: m["targets"].update({"09.09.09.09": "patched"})),
             "unknown build": ("box", lambda m: m["targets"].update({plus5.target_firmware.version: "latest"})),
             "built from another board image": ("box", lambda m: m["box"].update(stock_version="02.03.01.22")),
             "predecessor no older package carries": ("mcu", lambda m: m["mcu"]["predecessors"][0].update(version="02.01.01.10")),
@@ -125,7 +136,7 @@ class InstallerCompatibilityTests(unittest.TestCase):
                 bundle = Path(tempfile.mkdtemp(prefix="board-targets-"))
                 self.addCleanup(shutil.rmtree, bundle)
                 shutil.copytree(REPO_ROOT / "firmware", bundle / "firmware")
-                path = bundle / BOARD_MANIFESTS[board]
+                path = bundle / BOARD_MANIFESTS[board][0]
                 data = json.loads(path.read_text())
                 change(data)
                 path.write_text(json.dumps(data))

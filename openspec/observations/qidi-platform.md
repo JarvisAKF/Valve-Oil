@@ -2,7 +2,7 @@
 
 ## Firmware and service behavior
 
-- Supported QIDI Max 4 stock comparisons use `https://github.com/thelegendtubaguy/Qidi-Max4-Defaults`; QIDI Plus 5 comparisons use `https://github.com/thelegendtubaguy/Qidi-Plus5-Defaults`.
+- Supported QIDI Max 4 stock comparisons use `https://github.com/thelegendtubaguy/Qidi-Max4-Defaults`; QIDI Plus 5 comparisons use `https://github.com/thelegendtubaguy/Qidi-Plus5-Defaults`; QIDI Smart 5 comparisons use `https://github.com/thelegendtubaguy/Qidi-Smart5-Defaults`.
 - Firmware identity is exposed in `/home/qidi/update/firmware_manifest.json` at `SOC.version`.
 - **Runtime-confirmed:** [GitHub issue #71](https://github.com/thelegendtubaguy/valve-oil/issues/71) reported firmware `01.01.06.04` with `/home/qidi/klipper/klippy/extras/homing.py` SHA-256 `0310d9ed0a838b2a7ecff8cd2ec15488b1ae3d8f165a458addd16d8366a60761`. The attached file differs from the previously captured `01.01.06.04` SHA-256 `ff0439f8b9e702537f66c16508f7b0a137b27cff51eb653aa951172d3e5184a0` only by a conditional `endstop_sync_reset()` block before endstop `home_start()` setup.
 - Unresolved: `Qidi-Max4-Defaults` firmware snapshots currently contain `config/` and do not establish which `01.01.06.04` distribution or update path supplies each `homing.py` variant.
@@ -108,7 +108,7 @@ Comparisons in this section are against Max 4 firmware `01.01.07.01`, released t
   - THR is on `/dev/ttyS4` at `500000` with the same `lis2dw` and `probe_air` pins as Max 4. Filament switch `THR:PA1`, hotend fan `THR:PA11`, and hotend-fan tachometer `THR:PA12` replace Max 4's `PA0`, `PA15`, and `PB5`.
   - There is no `[fan_generic auxiliary_cooling_fan2]`. The bed mesh is `15,15`–`305,305` at 7×7. `z_tilt` probes `15,160` and `305,160`, the resonance probe point is `162,162`, the screws are at `32.5`/`287.5`, and `probe_air` `z_offset` is `-0.075`.
   - `[box485]` and `[box2base]` match Max 4.
-- **Config-confirmed:** every file in the `01.01.02.01` `printer_data/config` payload uses CRLF line endings; the Max 4 `01.01.07.01` config files use LF.
+- **Config-confirmed:** the `.cfg` files in the `01.01.02.01` `printer_data/config` payload use CRLF line endings, and `crowsnest.conf`, `moonraker.conf`, `drying.conf`, and `officiall_filas_list.cfg` use LF; the Max 4 `01.01.07.01` config files use LF.
 - **Config-confirmed:** the stock `klipper-macros-qd/` differs from Max 4 in `kinematics.cfg`, `filament.cfg`, `qd_macro.cfg`, `pause_resume_cancel.cfg`, `park.cfg`, `globals.cfg`, `fans.cfg`, and `start_end.cfg`; the other macro files match after line-ending normalization.
   - Homing: `_HOME_X` and `_HOME_Y` set both XY drivers to `0.9 A`, run `G28.6245197` on the axis, restore `run_current`, beep, and back off 10 mm. `_HOME_XY` homes Y, X, then Y again. A full `G28` sets the kinematic position to X/Y `100` and Z to half of `axis_maximum.z`, moves Z+5, X-5, and Y+5, waits 2 s, homes XY, moves to the bed center, homes Z, raises Z 20 mm, and sets `_HOME_STATE` `is_homed=1`. No `EXIT_ENFORCE_MODE`, `SET_HOMING_STATE`, or `SET_HOMING_MODE` command is issued.
   - The stock `[homing_override]` acts only on requests naming both X and Y: `G28 X`, `G28 Y`, and `G28 Z` alone set acceleration and speed factor, disable the extruder, and home nothing. `_HOME_X` and `_HOME_Y` call `BEEP I=1 DUR=100`, which no stock config file or Python extra defines; the compiled extras were not checked.
@@ -159,6 +159,102 @@ Comparisons in this section are against Max 4 firmware `01.01.07.01`, released t
 - **Runtime-confirmed (operator report, issue 274, 2026-11-12 to 2026-11-14, one Plus 5 `01.01.02.01` with one USB Box, `klippy.log` attached):** on stock config, with Z tilt and bed mesh `speed` 150 and `max_velocity` 600, a print completed. After Valve Oil `26.11.11.4` raised Z tilt and bed mesh `speed` to 565, four Box print starts, on `26.11.11.4` and `26.11.12.1`, were cancelled during nozzle clearing or just after Z tilt, with the operator reporting that X lost its position and the belt skipped while the bed was probed. `klippy.log` held no shutdown, TMC driver error, or `Timer too close` line; open-loop step loss doesn't appear there. Bed leveling and input shaper calibration on the same printer completed.
 - **Unresolved:** whether the 565 mm/s Z tilt travel, the 565 mm/s chute travel at 20000 mm/s², or the optimized homing caused the Plus 5 step loss, and whether 400 mm/s holds on Plus 5 hardware.
 - **Unresolved:** for the Plus 5, Box tool-change timing; host load while printing; and whether Klipper reaches ready with an RS-485 device attached.
+
+## QIDI Smart 5
+
+Comparisons in this section are against Plus 5 firmware `01.01.02.01`, released the same day with the same SOC version. Runtime-confirmed bullets come from the project's Smart 5 on 2026-11-15: it arrived on `01.01.01.03` and was updated to `01.01.02.01` through QIDI's touchscreen update. Unless a bullet says otherwise, the observations elsewhere in this file come from Max 4 or Plus 5 printers and are not established for the Smart 5.
+
+### Firmware packages
+
+- **Config-confirmed:** `Qidi-Smart5-Defaults` commit `c8e9da1609d29fb3b4ed567ea4b0c216873b7c33` records archive `S5_01.01.02.01_20261016_Release.zip` SHA-256 `5677f126716aaa0c084c02a787145bc911cd346badd87cca350cecaeebbc041e`, firmware-manifest SHA-256 `854c31f880ef7d783ea70364456a38912673c7ef90b07d9c0b1ca24fde90d21b`, and SOC payload `S5_SOC_01.01.02.01_20261016_Release_NA` SHA-256 `6630997ca6bf99bdb8519fdddab3f8b522d91eeb58cf5344b5fcde47a066add7`. File names start with `S5_`, not `QD_`. QIDI's update API names the printer `S5`.
+- **Config-confirmed:** the manifest lists SOC `01.01.02.01`, MCU `02.01.01.110`, THR `02.02.01.09`, BOX `02.03.01.21`, BOX485 `02.04.01.01`, and BUFFER `02.05.01.01`, with no `CLOSED_LOOP_MOTOR` entry. The BOX, BOX485, and BUFFER images are byte-identical to the Plus 5's. The others are new:
+
+  | Image | SHA-256 |
+  |---|---|
+  | `S5_MCU_02.01.01.110_20260918.bin` | `2f1ac6ba1d1bb39791b38e6bf7572d11622a11a09917839660796a0115369b0b` |
+  | `S5_THR_02.02.01.09_20260520.bin` | `4bcc5dea3fec9d114dc444c0b9b24933eca901adf0051932a9c5b6afca144b54` |
+
+- **Config-confirmed:** the SOC payload is Debian package `s5-system` `01.01.02.01`. `preinst` and `prerm` are byte-identical to the Plus 5's, and `postinst` differs only in `VERSION`, so an update removes the same config files.
+- **Config-confirmed:** `/home/qidi/fluidd`, both virtualenvs, `system_stats`, and the shipped `/etc` files are byte-identical to the Plus 5's. Moonraker differs only in `extensions.so`, `frp_manager.so`, and `mqtt.so`. The payload ships no kernel, boot image, or modules, and no `algo_app.service`.
+- **Static-recovered:** `qidiclient` (SHA-256 `6beea0a13cc7448c7f6ab8c345915f22e6d5c04c917a66478d6e43b1ceecd6bf`) is built from its own source tree, `/builds/qidi/3dprinter_s5/qidiclient`. It names the printer `SMART5`, reads offline updates from `USB/QD_Update/S5_`, draws its UI from `draw_ui/S5/3.97_inch` (the Plus 5's size class) with 800×480 landscape art, and adds `/dev/ttyS1` to its mainboard search paths.
+- **Runtime-confirmed:** the earlier `01.01.01.03` (`S5_SOC_01.01.01.03_20260831_Release_NA`) carried the same MCU, THR, and BOX versions, with `S5_MCU_02.01.01.110_20260829.bin`. Its configuration had no `[box485]` or `[box2base]`, no `T0`–`T11` macros, an older `RESUME`, a 6200 Ω thermistor pullup where `01.01.02.01` has 5700, and a `restore_factory_settings` macro; its Klipper tree lacked the RS-485 Box modules and differed in the other Box `.so` files and `toolhead.py`. After the update, the live configuration matched the `01.01.02.01` snapshot apart from the redacted copyright lines, and the update replaced `printer.cfg`, dropping the operator's saved shaper and mesh.
+- **Config-confirmed:** `resource/model_config/S5.json` declares `printer_series` `series_s5`, a `0`–`315 °C` nozzle range and a `0`–`85 °C` bed range, no chamber, chamber fan, or auxiliary fan, AI monitoring, and `p2p` camera access at 720p.
+
+### Boards
+
+- **Static-recovered:** the mainboard image is not an STM32 image. It starts with an NXP i.MX RT FlexSPI configuration block and image vector table, its strings name `src/rt1050/drivers/`, and its Klipper dictionary has `CLOCK_FREQ` 600 MHz, pins `GPIO1.0`–`GPIO4.31`, no `MCU` constant, and the `config_cuc*`, `cuc_setup_home`, and `query_cuc*` commands. Stock `printer.cfg` reaches it on `/dev/ttyS1` at 500000 baud.
+- **Static-recovered:** THR `02.02.01.09` is built for the Plus 5's `stm32f103xe` at 72 MHz with the same command set as `02.02.01.08`, but its code moved. The LIS2DW FIFO poll is now its own function (`0x0800c3a8`) with the same logic: a nonzero sample count (`r6`) rearms the poll timer at `0x0800c430`, and an empty FIFO stores `r6` into the scheduler state and wakes the task. `r7` is zero for the whole function. The byte sequences the THR FIFO fix replaces in `02.02.01.08` occur nowhere in it.
+- **Runtime-confirmed:** the THR application is QIDI's `S5_THR_02.02.01.09` image byte for byte (35,072 bytes, then erased flash). Its bootloader, SHA-256 `a21a3019004a4a3e50ec2e07882b8b39b7ff028161e692e83191144c14da7342`, answered a non-erasing probe after the application's `reset` with identity `01020103`, and the application returned unchanged.
+- **Static-recovered:** that bootloader is the `46358f30…` code with one more call in `main` (`0x080018ca`), to the function that builds the identity reply, so it sends `a5 00 0004 01020103` with its CRC once at startup without being asked. Every hook and buffer the transfer profile uses keeps the `46358f30…` address; the later code shifts by those 4 bytes.
+- **Runtime-confirmed:** the mainboard is an i.MX RT1052 (NXP SDK paths `lib/nxp/rt1052`, `CLOCK_FREQ` 600 MHz) whose Klipper application answers `debug_read` across its FlexSPI flash at `0x60000000`. That flash holds a separate bootloader of 29,944 bytes (SHA-256 of those bytes `f260161127ae745491f7e698aaebb1a09d6c847450a03796e3d51223d58b83ed`) with its own boot header, and at `0x60020000` QIDI's `S5_MCU_02.01.01.110_20260918.bin` byte for byte, so the update from `01.01.01.03` reflashed it.
+- **Static-recovered:** the mainboard bootloader talks on the same UART as Klipper (`/dev/ttyS1`) at 115200 with the THR's A5 framing and CRC16, sends identity `01410103` unasked at reset, and listens 5 s before jumping to the application; it erases and programs only from `0x60020000`. The application itself drives the X, Y, and Z motors (current loops on FlexPWM and ADC_ETC), has no SPI, I²C, accelerometer, or closed-loop driver commands, no watchdog, and no "Timer too close" check.
+
+### Host
+
+- **Runtime-confirmed:** the host board is the Max 4's and Plus 5's: Rockchip RK3308B-S (`rk3308bs-evb-amic-v11`), four Cortex-A35 cores at up to 1.104 GHz, 498,620 kB of memory, a 29 GB eMMC. `/dev/fb0` is 480×800 at 32 bpp, the touchscreen is a Goodix on `event0`, and the camera an icSpring `4a54:5231`. `usbdevice.service` runs, and `rockchip.service` fails as on the Plus 5.
+- **Runtime-confirmed:** the kernel is `5.10.160 #15 SMP PREEMPT Fri Apr 3 15:46:16 CST 2026` on both `01.01.01.03` and `01.01.02.01`. Its decompressed `Image` is the Plus 5's `#3` apart from 76 bytes, the version banner, the version string, and the build ID, and its 42,585 built-in `/proc/kallsyms` symbols have the Plus 5's names and addresses.
+
+### Klipper and stock configuration
+
+- **Config-confirmed:** the `klippy` tree adds `extras/cuc.so` to the Plus 5's 234 files, and 23 files differ:
+  - `homing.py` (CRLF SHA-256 `9c2d0a479f0fc43e1ec2234e1357e6a19b9d9dadff7fcbd3f85a0d2bf3f9b00f`) drops the `endstop_sync_reset` block and the closed-loop homing-mode scripts. Its checked second homing runs each stepper's `before_homing_gcode` and `after_homing_gcode` around each touch instead, and the new `SET_SECOND_HOMING ENABLE=0|1` turns that second homing off and on. The 1 s dwell before each rail homes is unchanged.
+  - `stepper.py` adds those two per-stepper templates.
+  - `stepper_enable.py` is the Max 4's, with `ENABLE_DELAY_TIME = 0.300`.
+  - `mcu.py` adds `CUCTriggerDispatch` and drops `endstop_sync_reset`.
+  - `heaters.py` adds the `open_5s_limit` options, which stock `[extruder]` enables at 0.5.
+  - `neopixel.py` and `spi_temperature.py` are back to the Max 4's values.
+  - Among the compiled extras, `box_extras.so`, `box_stepper.so`, `multi_color_controller.so`, `box2base.so`, and `closed_loop.so` changed code; the rest differ only in their build paths.
+- **Static-recovered:** `cuc.so` defines `[cuc x|y|z]`, a `cuc_<axis>:virtual_endstop`, and `SET_CUC_CURRENT`, `CUC_READ`, `CUC_LOG`, `CUC_SET_THRESH`, `CUC_TEST_EN`, and `CUC_TEST_CLOSE`. It configures per-motor current, microsteps, PID gains, and a stall threshold on the mainboard, and homes through `cuc_setup_home` and trsync. Its X, Y, and Z motors have no TMC driver objects.
+- **Static-recovered:** `box_extras.so` drops `button_box_unload`, `button_extruder_load`, and `button_extruder_unload`. Its `CLEAR_OOZE` and `CLEAR_FLUSH` strings move to X66–X100, Y189–Y199.5, and its flush purge drops from E150 to E100. `box_stepper.so` keeps the Plus 5's method names and constants with its toolhead moves moved onto a 180 mm bed. `multi_color_controller.so` has no external-spool bite and retry flow.
+- **Config-confirmed:** `printer.cfg` against Plus 5 `01.01.02.01`:
+  - `[mcu]` is defined inline with no `[include MCU_ID.cfg]`.
+  - X and Y home toward their minimums by motor stall on `cuc_x` and `cuc_y`: travel X −2–185 and Y −4–200, `homing_speed 50`, `second_homing_speed 50.0`, `homing_retract_dist 50.0` at 200 mm/s, `homing_tolerance 2`, and `homing_retries 10`. The run current is 1.6 A (Z 0.8 A), and every motor shares enable pin `GPIO4.16`.
+  - Z has one motor (`rotation_distance` 4, max 182) homed on the nozzle probe. There is no `[z_tilt]`, chamber heater, auxiliary fan, or polar cooler.
+  - Limits are `max_velocity: 400` and `max_accel: 20000`; the bed's `max_temp` is 85.
+  - The extruder uses `rotation_distance 35.5` and `gear_ratio 6.3:1`, an NTC sensor on `THR:PA4`, and `max_temp 315`. THR is on `/dev/ttyS4` with the Plus 5's filament switch (`THR:PA1`), hotend fan, accelerometer, and `probe_air` pins; `probe_air` has `delta_v: 0.04` and `z_offset: -0.11`.
+  - The bed mesh is `10,10`–`165,170` at 5×5, the resonance probe point is `90, 90, 10`, and the `SAVE_CONFIG` shaper is `zv` 68.6 / `mzv` 49.4.
+  - `[box485]`, `[box2base]`, `[multi_color_controller]`, and `box.cfg` match the Plus 5.
+- **Config-confirmed:** the `.cfg` files in `printer_data/config` and `klipper-macros-qd/` use CRLF line endings; `crowsnest.conf`, `moonraker.conf`, `drying.conf`, and `officiall_filas_list.cfg` use LF, as on the Plus 5.
+- **Config-confirmed:** the stock `klipper-macros-qd/` differs from the Plus 5's in `kinematics.cfg`, `filament.cfg`, `qd_macro.cfg`, `pause_resume_cancel.cfg`, `park.cfg`, `globals.cfg`, `fans.cfg`, `heaters.cfg`, and `start_end.cfg`:
+  - Homing: `_BEFORE_HOME_X` sets both motors to 0.5 A with `SET_CUC_CURRENT`, `_BEFORE_HOME_Y` to 0.45 A, and both `_AFTER_HOME_*` back to 1.6 A. `_HOME_X` and `_HOME_Y` run `G28.6245197` on the axis, call `BEEP`, and back off 20 mm. A full `G28` sets the kinematic position, moves Z+5, X+5, and Y+5, runs `M84`, homes X then Y once with second homing off and the current macros around each, homes X then Y again with second homing on, moves to the bed center, homes Z, and raises Z 10 mm. `G28 X` and `G28 Y` alone home that axis.
+  - Positions: park and chute `100, 199`; `print_max` `(180,180)`. Behind Y180, QIDI's moves stay between X66 and X100, and its `MOVE_TO_TRASH` first leaves to Y179 from outside X80–X100.
+  - Cutter, front right: Y1, X175 at F5000, X178 and X180 at F60, a 4 mm retract, a 2 s hold, then X160.
+  - Wiper: Y180–Y199 and Y182–Y199 strokes into the chute, and a pad across X66–X100 at Y185–Y199. `CLEAR_NOZZLE` probes once at X79 Y187, scrubs 0.1 mm above that, and repeats over X85–X95, Y185–Y187.
+  - `fans.cfg` has no polar cooler; `heaters.cfg` sets the nozzle maximum to 300 and the bed to 80, and comments out `_CHECK_HEATER_PARAMS`.
+
+### Motion
+
+- **Runtime-confirmed:** stock `01.01.02.01`, cold, idle: a full `G28` took 32.0–33.2 s over five timed runs. Each checked second home landed 0.73–0.80 mm (X) and 0.69–0.81 mm (Y) past the first, within QIDI's 2 mm tolerance, and the second Z touch agreed within 2–5 µm. `PROBE_ACCURACY` at X90 Y90 (10 samples) gave a 7.5 µm range and a 2.2 µm standard deviation. QIDI's cut stroke (Y1, X175 to X180 at F60), chute entrance (X100 Y199), and wipe strokes (Y182–Y199, X66 Y189 to X100 Y198) ran at Z70 without errors.
+- **Runtime-confirmed (2026-11-16, `01.01.02.01` with Valve Oil installed, bed at 45 °C):** QIDI's load-cell Z home false-triggers when it runs within seconds of the nozzle reaching 140 °C from 32–45 °C: each touch fires as its move starts, 1.5 mm above the one before (for example Z 20.0, 21.5, 23.0), QIDI logs `WEIGHT:run home_second_genera retry!`, zeroes the load cell again, and the retry homes within 0.05 mm of a cold home. It did so in 2 of 2 print starts, 2 of 2 runs that waited for 140 °C with `M109` and then homed Z, and 1 of 1 such run with the heater turned off just before the Z home. Cold homes (2), homes after 30 s or more at 140 °C (2), a home with the heater just turned off after a long hold (1), and two homes started as the nozzle began heating were clean. Heater duty at the failing touches (14–37 %) matched the clean held homes (11–22 %). The load cell's zero read about −3.37 cold and −3.11 to −3.23 hot.
+
+### Display and touch
+
+- **Runtime-confirmed (2026-11-16, `01.01.02.01` with Valve Oil installed):** `/dev/fb0` is 480×800 at 32 bpp, as on the Plus 5, and `event0` is `Goodix Capacitive TouchScreen` with `ABS_X`/`ABS_MT_POSITION_X` 0–479 and `ABS_Y`/`ABS_MT_POSITION_Y` 0–799. Turned 90° clockwise, the framebuffer shows the home screen upright as the operator sees it. Operator taps on the screen reported touch positions in the framebuffer's own coordinates: Settings at (288, 698) and the back arrow at (44, 758), where the turned image has those controls. Taps written to `event0` through the Printer screen service's own mapping, Settings at upright (85, 295) → framebuffer (295, 714) and back at (41, 44) → (44, 758), opened Settings and returned home.
+- **Runtime-confirmed:** udev gives `/dev/fb0` to group `video` partway through boot; the Valve Oil boot animation, starting as `qidi` with group `video`, got `Permission denied` on it on two boots of three before it waited for access.
+
+### Touchscreen expert mode
+
+- **Static-recovered:** in Smart 5 `qidiclient` `01.01.01.03` and `01.01.02.01`, the Settings page's Expert Mode switch (`general.expert_mode` in QIDI Moonraker's `config` table, default `"0"`) only changes the Control page's XYZ tab: with it on, the jog buttons work before homing and an "Unlock steppers" button sends `M84`. An unhomed jog sends `SET_KINEMATIC_POSITION X=150 Y=150 Z=150`, the relative move, then `M84`, so Klipper's travel limits are checked against that position. The Plus 5 client has the key and the strings but no Settings switch.
+- **Runtime-confirmed:** the project's Smart 5 had it on before its update.
+
+### Touchscreen LAN-only mode
+
+- **Runtime-confirmed (2026-11-16, `01.01.02.01`, no account linked):** with `general.lan_mode` `"1"` in QIDI Moonraker's `config` table, the home screen's account tile reads `LAN Only Mode` and the Settings page's Account row is greyed out with the same text. Settings has no other LAN-mode row, so the operator found no way to turn it off on the touchscreen. Writing `"0"` through `POST /server/database/config/update` logged `LAN mode disabled: MQTT reconnected, FRP started` and brought the Account row back.
+- **Runtime-confirmed:** with no `user.token` saved, that write starts QIDI's MQTT reconnect loop, which `8.149.135.149:8883` refused with `Bad user name or password` every 4–8 s; Moonraker's logs from July on show no MQTT connection attempt on this printer before it.
+- **Runtime-confirmed:** the `01.01.02.01` update's database backup (`moonraker-sql.db.bak`, 2026-11-15) has no `general.lan_mode` row. No logged single-key write set it, so it came through QIDI's batch config path, which doesn't log. Its row id places it early after the update, during the night the printer had no network, but about 276 writes since the backup left no log line, so the time isn't certain. Restarting `qidiclient` with it at `"0"` didn't set it again.
+
+### Slicer profiles
+
+- **Config-confirmed:** QIDI Studio (`21d47457`, `Qidi X-Smart 5`, `model_id` `S5`) and OrcaSlicer (`478cc90a`, `Qidi X-Smart 5`) ship a 180×180 printable area, 180 mm height, 400 mm/s, 15,000 mm/s², and a `bed_exclude_area` of X168–180, Y0–32 under the cutter. Their G-code is the same in both slicers apart from the chamber placeholder. Against the Plus 5's, the start leaves out the chamber commands, `M1004`, and `Z_TILT_ADJUST`; it purges 180 mm, wipes at the chute, probes and scrubs behind the bed, presses the cutter at X175–X181, and draws the prime line from X70 to X110 at Y1. Each filament-change flush ends with five chute wipes. The timelapse-with-wipe-tower layer change moves to Y380, past the Smart 5's Y travel.
+
+### Unresolved
+
+- Whether `qidiclient` writes `MCU_ID.cfg` on it (a root-owned one exists that `printer.cfg` doesn't include).
+- Whether the toolhead extruder sits above the cutter, which the cold cut depends on.
+- Box load and unload lengths with the Smart 5's `box_stepper.so`, and whether its `do_home` lengths are the Plus 5's.
+- The bed screws' positions and thread.
+- Whether QIDI's `M84` before homing and its first single touch per axis are needed for that repeatability.
+- What writes `general.lan_mode` `"1"`, and whether the touchscreen can turn LAN-only mode off once it's on.
 
 ## Klipper shutdown reporting
 
@@ -328,6 +424,7 @@ The 4 KiB batch increased from `1.324 MiB/s` to `35.617 MiB/s`; the 256 KiB batc
 ## Touchscreen Moonraker connection
 
 - **Runtime-confirmed:** on one Max 4 running `01.01.07.01`, `qidiclient` connects to Moonraker directly at `127.0.0.1:7125` (user agent `WebSocket++/0.8.2`, registered as agent `QD_MAX4`), not through nginx.
+- **Runtime-confirmed (2026-11-16, Smart 5 `01.01.02.01`):** the Smart 5 `qidiclient` connects the same way but registers as agent `S5` (`{'name': 'S5', 'version': '01.01.02.01', 'type': 'agent', 'url': 'local'}`), without the `QD_` prefix.
 - **Static-recovered:** in `qidiclient` SHA-256 `b5285d1a52f1180757360d0893f0f8ed619aaaa31d2d621917c0a963bc3fde4e` (`01.01.07.01`), a loop checks the Moonraker connection every 5 seconds and reconnects when it is down. After 10 consecutive failed reconnects it logs `检测到连接断开重连次数达到阈值，报错 MoonrakerError` ("reconnect attempts reached the threshold, reporting MoonrakerError") and sets its `moonrakererror` key; a successful connection resets the count. Ten failed subscription attempts instead report `KlipperError`.
 - **Static-recovered:** the `QDC_400_005_015_001` handler subscribes to `moonrakererror`; its show predicate is always true and its clear predicate always false. `resource/qidi_client_error/QDC_400_005_015_001/0.json` titles it `Printer service failed to start` with `Please reinstall or contact customer support`.
 - **Runtime-confirmed:** on that printer, `moonraker.service` has `Type=simple`, `Restart=always`, `RestartSec=10`, and `RemainAfterExit=yes`. A transient unit with the same settings whose process was sent SIGTERM stayed `active (exited)` with `NRestarts=0`, so a clean Moonraker exit outside systemd leaves Moonraker down while systemd reports the unit active. `klipper.service` also has `Restart=always` with `RemainAfterExit=yes`; `qidi-client.service` has `Restart=always` without it.

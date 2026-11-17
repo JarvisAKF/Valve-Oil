@@ -89,7 +89,7 @@ The Max 4 has 486 MB of memory and no swap. QIDI's AI detection alone can hold a
 
 Zram gives Linux a compressed swap area in memory instead: 256 MB of swap that holds about 2.3 MB of idle data per MB of memory it uses. On a Max 4, with memory filled the way it was on a printer that hit this shutdown, Klipper's longest delay went from 405 ms to 4 ms, and the program that filled memory was no longer killed.
 
-QIDI's kernel has no zram, so the package carries its own modules, built for the Max 4's kernel `5.10.160 #4 SMP PREEMPT Wed Sep 3 15:21:57 CST 2025`. The Plus 5's kernel, `5.10.160 #3 SMP PREEMPT Sat Aug 23 12:12:00 CST 2025`, is the same build with a different build date, so the modules load on it too. They load only on those two exact kernels; on any other, including after a QIDI update that changes it, the printer runs without zram until a package release supports that kernel. To check that zram is on, run `cat /proc/swaps` over SSH and look for `/dev/zram0`.
+QIDI's kernel has no zram, so the package carries its own modules, built for the Max 4's kernel `5.10.160 #4 SMP PREEMPT Wed Sep 3 15:21:57 CST 2025`. The Plus 5's kernel, `5.10.160 #3 SMP PREEMPT Sat Aug 23 12:12:00 CST 2025`, is the same build with a different build date, so the modules load on it too. The Smart 5's kernel, `5.10.160 #15 SMP PREEMPT Fri Apr 3 15:46:16 CST 2026`, is the Plus 5's build with a different build date, so they load on it too. The modules load only on those three exact kernels; on any other, including after a QIDI update that changes it, the printer runs without zram until a package release supports that kernel. To check that zram is on, run `cat /proc/swaps` over SSH and look for `/dev/zram0`.
 
 ### ADB
 
@@ -106,10 +106,10 @@ To check that ADB is off the network, run `sudo ss -tlnp | grep 5555` over SSH; 
 
 Otherwise, copy the machine G-code into your slicer by hand from the folder for your slicer and printer:
 
-| Slicer | QIDI Max 4 | QIDI Plus 5 |
-|---|---|---|
-| OrcaSlicer | [`orcaslicer_gcode/`](../orcaslicer_gcode/) | [`orcaslicer_gcode/plus5/`](../orcaslicer_gcode/plus5/) |
-| QIDI Studio | [`qidistudio_gcode/`](../qidistudio_gcode/) | [`qidistudio_gcode/plus5/`](../qidistudio_gcode/plus5/) |
+| Slicer | QIDI Max 4 | QIDI Plus 5 | QIDI Smart 5 |
+|---|---|---|---|
+| OrcaSlicer | [`orcaslicer_gcode/`](../orcaslicer_gcode/) | [`orcaslicer_gcode/plus5/`](../orcaslicer_gcode/plus5/) | [`orcaslicer_gcode/smart5/`](../orcaslicer_gcode/smart5/) |
+| QIDI Studio | [`qidistudio_gcode/`](../qidistudio_gcode/) | [`qidistudio_gcode/plus5/`](../qidistudio_gcode/plus5/) | [`qidistudio_gcode/smart5/`](../qidistudio_gcode/smart5/) |
 
 The two do the same thing; only their placeholder syntax differs. Files sliced with QIDI's stock G-code still print normally after installing, without the faster start.
 
@@ -173,7 +173,7 @@ While Valve Oil is installed, the touchscreen doesn't offer QIDI's online firmwa
 
 An update you start from a USB drive, or from a `QD_Mandatory_Update.zip` file, still installs QIDI's package. It's the way back onto a printer that can no longer be reached over the network. QIDI's package replaces the touchscreen app, Klipper, Moonraker, Fluidd, and the config folder, so it removes much of Valve Oil, and with the config folder Valve Oil's record of what it changed in the printer's system. Run the install command again afterwards. An [uninstall](#uninstall) after a USB update can't undo every system change Valve Oil made.
 
-This applies to the touchscreen apps Valve Oil has reviewed: Max 4 firmware `01.01.07.01` and Plus 5 firmware `01.01.02.01`. On the Max 4's older firmware, and on a touchscreen app that has been replaced or changed, the touchscreen offers QIDI's online updates as it does without Valve Oil. Uninstalling Valve Oil puts QIDI's touchscreen app back, and with it QIDI's online updates.
+This applies to the touchscreen apps Valve Oil has reviewed: Max 4 firmware `01.01.07.01` and Plus 5 and Smart 5 firmware `01.01.02.01`. On the Max 4's older firmware, and on a touchscreen app that has been replaced or changed, the touchscreen offers QIDI's online updates as it does without Valve Oil. Uninstalling Valve Oil puts QIDI's touchscreen app back, and with it QIDI's online updates.
 
 ### Automatic updates
 
