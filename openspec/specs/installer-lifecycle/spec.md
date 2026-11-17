@@ -7,7 +7,7 @@ The installer admits supported QIDI printers and firmware, changes only validate
 ## Requirements
 
 ### Requirement: Firmware-gated ownership
-The installer SHALL identify the printer from its detected supported firmware, select one complete baseline for that firmware, and change only recognized stock state or state proven to be installer-owned. Each supported firmware version SHALL belong to exactly one printer in `installer/package.yaml`.
+The installer SHALL identify the printer from its detected supported firmware, select one complete baseline for that firmware, and change only recognized stock state or state proven to be installer-owned. Each supported firmware key SHALL belong to exactly one printer in `installer/package.yaml`. A firmware key SHALL be the SOC version, prefixed with the printer's firmware key prefix when the printer declares one, and every firmware a printer with a prefix lists SHALL carry it.
 
 #### Scenario: Supported firmware selects one baseline
 - **WHEN** installation starts on firmware declared for a printer in `installer/package.yaml`
@@ -16,7 +16,16 @@ The installer SHALL identify the printer from its detected supported firmware, s
 - **AND** the managed macro tree is the common optimized macros plus that printer's macro folder, which provides the same macro names on every printer and no file that the common macros also provide
 
 #### Scenario: Firmware naming another printer is refused
-- **WHEN** the firmware manifest's SOC file name does not carry the model prefix of the printer that owns the detected firmware version
+- **WHEN** the firmware manifest's SOC file name does not carry the model prefix of a printer that lists the detected firmware under its key
+- **THEN** the firmware is treated as unsupported
+
+#### Scenario: Printers sharing a SOC version are told apart by the SOC file name
+- **WHEN** two printers ship the same SOC version and the firmware manifest's SOC file name carries one printer's model prefix
+- **THEN** the installer uses that printer's firmware key, baseline, and macro folder
+- **AND** installed state, backups, and source-patch records carry that key
+
+#### Scenario: A shared SOC version without a SOC file name is refused
+- **WHEN** the firmware manifest has no SOC file name and its version is declared for more than one printer
 - **THEN** the firmware is treated as unsupported
 
 #### Scenario: Invalid admission fails before unsafe work
@@ -169,9 +178,9 @@ The installer SHALL keep an available QIDI Box usable without claiming ownership
 
 #### Scenario: Optional Box state is reconciled conservatively
 - **WHEN** the Box stack is available
-- **THEN** explicit interactive or `--yes` policy may enable it
+- **THEN** a new install turns Box support on without asking, and a later install or update leaves Box support as the operator set it
 - **AND** missing active mappings are created as identity mappings
-- **AND** existing non-empty mappings change only after explicit interactive approval
+- **AND** existing non-empty mappings are left as they are, and no run asks about them
 
 #### Scenario: Box availability is transport-independent
 - **WHEN** a QIDI Box is attached through either the legacy USB configuration or the RS-485 Box stack
@@ -980,7 +989,7 @@ When the install's Box flow stops before any Box write, the install SHALL still 
 - **THEN** the install fails, Klipper, the touchscreen, and the automatic-update timer stay stopped, and the output names the `rescue` command
 
 ### Requirement: Optional add-ons
-The package SHALL let the operator install, update, and remove the add-ons pinned in `installer/package.yaml` (`addons:`) from Fluidd or `addons.sh`, changing nothing on the host but each add-on's directories under `~/tltg-addons/` and its systemd unit. Add-ons MUST NOT install system packages, change `printer_data/config`, or add Moonraker update-manager sections.
+The package SHALL let the operator install, update, and remove the add-ons pinned in `installer/package.yaml` (`addons:`) from Fluidd or `addons.sh`, changing nothing on the host but each add-on's directories under `~/tltg-addons/`, its systemd unit, and, for an add-on that needs a kernel module QIDI's kernel lacks, its root-owned directory under `/usr/local/lib/tltg-addons/`. Add-ons MUST NOT install system packages, change `printer_data/config`, or add Moonraker update-manager sections.
 
 #### Scenario: An add-on installs offline into its own directories
 - **WHEN** the operator installs an add-on while no print is running or paused and Klipper is not running G-code such as a calibration, whether or not a heater is on
@@ -996,6 +1005,14 @@ The package SHALL let the operator install, update, and remove the add-ons pinne
 - **AND** nothing is installed unless the fetched file matches the pinned sha256
 - **AND** an add-on without wheels gets no Python environment
 - **AND** a release whose download fails leaves the installed build running and is reported without failing the install
+- **AND** from a Debian package, only the files the add-on uses are extracted, and an install fails when the package lacks one
+
+#### Scenario: An add-on's kernel modules load only on their kernel builds
+- **WHEN** the operator installs an add-on whose manifest entry pins kernel modules
+- **THEN** the install is refused before anything is written unless the running kernel is one of the builds `system_optimizations.zram_swap` lists
+- **AND** the modules, verified against their pinned sha256, and the script that loads them are installed owned by root, outside the `qidi` user's directories
+- **AND** the add-on's service runs that script as root before the add-on starts, and the script loads nothing on any other kernel build and waits for udev to set the new devices' permissions
+- **AND** a missing or changed module or script is put back without rebuilding the add-on, and removal unloads modules nothing uses and deletes them
 
 #### Scenario: Releases bring installed add-ons to their pinned builds
 - **WHEN** install or update runs with an add-on installed whose build differs from the release's
@@ -1015,7 +1032,7 @@ The package SHALL let the operator install, update, and remove the add-ons pinne
 - **WHEN** the operator installs OctoEverywhere while Obico is installed, by the package or otherwise, or Obico while OctoEverywhere is
 - **THEN** the install is refused before anything is written, and the list names the add-on to remove first
 - **AND** an add-on already installed still updates
-- **AND** Tailscale installs alongside either
+- **AND** Tailscale and ZeroTier install alongside either
 
 #### Scenario: Obico leaves the printer configuration alone
 - **WHEN** Obico is installed and running
@@ -1034,6 +1051,12 @@ The package SHALL let the operator install, update, and remove the add-ons pinne
 - **AND** it needs no TUN device and changes no routes, firewall rules, or DNS settings
 - **AND** an update keeps the printer's tailnet identity
 - **AND** removing it logs the printer out of the tailnet before its identity is deleted
+
+#### Scenario: ZeroTier runs as the qidi user on the package's tun module
+- **WHEN** ZeroTier is installed and running
+- **THEN** the package's `tun` module, built from the zram modules' kernel tree and configuration, provides `/dev/net/tun`
+- **AND** `zerotier-one` runs as the `qidi` user with only `CAP_NET_ADMIN` and `CAP_NET_RAW`, keeping its identity, networks, and local API token in its data directory
+- **AND** an update keeps the printer's ZeroTier identity and networks
 
 ### Requirement: Add-ons in Fluidd
 Normal install and update SHALL provide a package-owned add-ons service and a Fluidd nginx route that Fluidd's **Add-ons** settings use to list add-ons and run one install, update, remove, or relink at a time, independently of optional OS optimization policy, with the same recognition, preservation, and restoration as the Printer screen service.
@@ -1067,6 +1090,12 @@ Normal install and update SHALL provide a package-owned add-ons service and a Fl
 - **THEN** its panel shows whether its service runs and whether the printer is on a tailnet
 - **AND** a printer that is not logged in gets a new sign-in address on request, which the panel shows until the printer is signed in
 - **AND** a connected printer shows its tailnet, its name and addresses there, and when its sign-in expires, and can be logged out
+
+#### Scenario: ZeroTier networks are joined from Fluidd
+- **WHEN** ZeroTier is installed
+- **THEN** its panel shows whether its service runs, whether ZeroTier is online, and the printer's node ID
+- **AND** the operator can join a network by its ID, and the service refuses an ID that is not 16 hexadecimal digits before running anything
+- **AND** each network shows its name, whether it waits for authorization naming the node ID to authorize, and the printer's addresses on it once connected, and can be left
 
 ### Requirement: QIDI Plus 5 support
 The installer SHALL admit QIDI Plus 5 firmware `01.01.02.01` as the Plus 5, with its own stock snapshot, guarded-patch variants, source-patch expectations, and macro folder. It SHALL apply Max 4 firmware and host fixes to a Plus 5 only where that Plus 5's hardware, bootloader, or kernel is recognized for them.
@@ -1163,3 +1192,97 @@ An install SHALL replace QIDI's boot logo with Valve Oil's in a boot partition o
 - **WHEN** the printer boots with the animation installed
 - **THEN** it plays from shortly after local file systems are mounted until a touchscreen app process exists, at most 2 minutes, and ends on its first frame, which is the boot logo
 - **AND** it draws nothing while a QIDI firmware update or an install shows its own screen, or when the touchscreen app already runs
+
+### Requirement: QIDI Smart 5 support
+The installer SHALL admit QIDI Smart 5 firmware `01.01.02.01` as the Smart 5, under firmware key `smart5-01.01.02.01`, with its own stock snapshot, guarded-patch variants, source-patch expectations, and macro folder. It SHALL apply firmware and host fixes built for other printers to a Smart 5 only where that Smart 5's hardware, firmware image, bootloader, or kernel is recognized for them.
+
+#### Scenario: Smart 5 firmware selects the Smart 5 baseline
+- **WHEN** installation starts on firmware `01.01.02.01` whose firmware manifest SOC file starts with `S5_SOC_`
+- **THEN** the Smart 5 stock snapshot, the Smart 5 variant of every guarded patch, and `installer/klipper/printers/smart5/` are used
+- **AND** a guarded patch with no Smart 5 variant leaves the Smart 5's value unchanged
+
+#### Scenario: Other printers' hardware fixes are not applied to the Smart 5
+- **WHEN** install, update, or a firmware tool runs on a Smart 5
+- **THEN** its THR gets the FIFO fix built from its own `02.02.01.09` image, never the `02.02.01.08` build
+- **AND** the mainboard closed-loop fix is not offered, and the mainboard is not read or flashed
+- **AND** the Box firmware fix is offered only for bootloader builds already admitted for it
+- **AND** zram modules load only on a kernel build declared for them
+
+#### Scenario: Smart 5 Box motion keeps QIDI's values
+- **WHEN** install, update, or idle automatic-update repair runs on a Smart 5
+- **THEN** no Box motion release default is saved
+
+### Requirement: Install from a USB drive on the touchscreen
+Each release SHALL publish one USB drive image that an operator extracts to a USB drive and starts from the touchscreen of any supported printer, without SSH or a network. It SHALL run the package's install on the touchscreen with the same firmware gate, printer-state checks, backup, rollback, and firmware safeguards as an install started over SSH, and SHALL return the touchscreen to QIDI's app when the operator quits.
+
+#### Scenario: First install from USB
+- **WHEN** an operator starts the USB installer on a supported printer without Valve Oil and confirms the summary
+- **THEN** the printer ends with the same installed state as an SSH install with the same answers, and the finish screen says what to do next
+
+#### Scenario: One drive for every printer
+- **WHEN** the same drive is plugged into a Max 4, a Plus 5, or a Smart 5
+- **THEN** that printer's offline update page lists only the Valve Oil package for that printer
+
+#### Scenario: Printer already has Valve Oil
+- **WHEN** an operator starts the USB installer on a printer with Valve Oil installed
+- **THEN** the first screen shows the installed version and the drive's version, and offers updating with the install's current settings
+
+#### Scenario: Unsupported firmware or busy printer
+- **WHEN** the printer's firmware is unsupported, a print is running or paused, or a heater has a target
+- **THEN** the installer changes nothing in the package's managed state, says why on the touchscreen, and returns the touchscreen to QIDI's app when the operator quits
+
+#### Scenario: Install finishes
+- **WHEN** a USB install finishes
+- **THEN** the log is on the drive before the finish screen shows, and the printer restarts when the drive is taken out or the operator chooses to restart with it in
+
+#### Scenario: Older supported firmware with no network
+- **WHEN** a USB install runs on a printer whose QIDI firmware the release updates from and the printer has no network
+- **THEN** the QIDI firmware update uses the package on the drive once it matches the pinned size and SHA-256, and the install continues as it would after a downloaded update
+
+#### Scenario: A board is not admitted
+- **WHEN** a new install from USB finds a board the release does not admit
+- **THEN** nothing is installed, and the touchscreen names the board and shows the printer-support issue link, filled in as an SSH install's is, as a code a phone can scan
+
+### Requirement: USB installs keep QIDI's update folder
+A run started from a USB drive on a supported firmware SHALL leave QIDI's update folder holding QIDI's firmware manifest and board images for that firmware, whether the operator installs, quits, or the run fails.
+
+#### Scenario: Operator quits a USB run
+- **WHEN** an operator starts the USB installer on a supported firmware and quits without installing
+- **THEN** QIDI's update folder holds QIDI's manifest and board images for the printer's firmware
+
+#### Scenario: The installer doesn't start
+- **WHEN** QIDI's app has installed the drive's package but the installer fails to start
+- **THEN** QIDI's update folder was already restored before the start was attempted
+
+#### Scenario: Firmware with no restore set
+- **WHEN** the drive's package runs on a printer whose QIDI firmware the drive carries no files for
+- **THEN** the touchscreen says QIDI's update folder was emptied and how to get QIDI's files back, and nothing else changes
+
+### Requirement: Installs ask first and then run unattended
+An install started from the touchscreen or over SSH SHALL show the detected printer, QIDI firmware, and installed package version, ask every question that applies, and show one summary of the answers. It MUST NOT change the package's managed state before the operator confirms the summary, and MUST NOT need input from then until the finish screen.
+
+#### Scenario: Operator quits before confirming
+- **WHEN** an operator answers some or all questions and quits before confirming the summary
+- **THEN** the package's managed state, configuration, and system changes are as they were before the installer started
+
+#### Scenario: Step fails after confirmation
+- **WHEN** a step fails after the operator confirmed the summary
+- **THEN** the installer applies the same rollback as an SSH install, and the touchscreen names the failed step, says what state the printer is in, and says where the log is
+
+### Requirement: The touchscreen shows install progress
+While an install or update holds the touchscreen, whether started from a USB drive, over SSH, or as an automatic update, the screen SHALL show the current step by name, its place among the run's steps, the elapsed time, and how the run was started, with system changes and each board firmware flash as steps of their own.
+
+#### Scenario: Box firmware is flashed
+- **WHEN** a touchscreen install flashes a USB Box
+- **THEN** the screen names that Box's firmware as the current step for as long as the flash runs
+
+#### Scenario: Automatic update
+- **WHEN** an automatic update holds the touchscreen
+- **THEN** the screen says the printer is updating itself, from which version to which, and shows the current step
+
+### Requirement: Installer runs keep a log
+Every install, update, and uninstall run SHALL write a log of what it detected, decided, and did to the printer's log folder, where it can be downloaded without SSH. A run started from a USB drive SHALL also save that log to the drive when it finishes or fails.
+
+#### Scenario: Run fails
+- **WHEN** an install started over SSH or from a USB drive fails
+- **THEN** the failure message names the log, and the log holds the failed step and its error
