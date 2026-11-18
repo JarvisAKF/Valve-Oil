@@ -71,6 +71,27 @@ CONTINUE_IT = ("Continue it with Update now or by running the Valve Oil"
 BOOT_ID = "/proc/sys/kernel/random/boot_id"
 
 
+def _version_key(version):
+    if not isinstance(version, str) or not re.match(r"^\d+(\.\d+)*$",
+                                                    version):
+        return None
+    return tuple(int(part) for part in version.split("."))
+
+
+def _release_installed(item, installed):
+    # A release no newer than the one Klipper runs is installed, unless the
+    # check found it needs installing again (its installed state is missing
+    # or has drifted). An install that went past it, or the last check
+    # written before an install, can still list it.
+    if item.get("reinstall") is True or not installed:
+        return False
+    version = item.get("version")
+    if version == installed:
+        return True
+    waiting, running = _version_key(version), _version_key(installed)
+    return waiting is not None and running is not None and waiting <= running
+
+
 class PrinterWarnings:
     def __init__(self, config):
         self.printer = config.get_printer()
@@ -395,16 +416,14 @@ class PrinterWarnings:
             isinstance(items, list)) else []
         installed = self._installed_release()
         for kind in ("release", "firmware", "board"):
-            # A release Klipper already runs is installed, unless the check
-            # found it needs installing again (its installed state is missing
-            # or has drifted).
             group = [item for item in items if item.get("kind") == kind
-                     and not (kind == "release" and installed
-                              and item.get("version") == installed
-                              and item.get("reinstall") is not True)]
+                     and not (kind == "release"
+                              and _release_installed(item, installed))]
             if not group:
                 continue
             reasons = []
+            window = None
+            only_window = True
             for item in group:
                 blockers = item.get("blocked_by")
                 for blocker in blockers if isinstance(blockers, list) else []:
@@ -412,11 +431,24 @@ class PrinterWarnings:
                         continue
                     reason = (self._pending_text(blocker.get("message"))
                               or self._pending_text(blocker.get("code")))
+                    # "it's outside the update window, 02:00–05:00 <zone>"
+                    if blocker.get("code") == "outside_window" and reason \
+                            and ", " in reason:
+                        window = reason.split(", ", 1)[1]
+                    else:
+                        only_window = False
                     if reason and reason not in reasons:
                         reasons.append(reason)
             if not self.enrolled:
                 message = ("Automatic updates are off, so run the Valve Oil"
                            " installer to install it.")
+            elif window and only_window:
+                message = ("Automatic updates are on, so it will be installed"
+                           " during the update window, " + window + ", while"
+                           " the printer is idle.")
+                if kind != "release":
+                    message += (" The printer can't be used while it"
+                                " installs.")
             elif reasons:
                 message = ("Automatic updates are on, but it hasn't been"
                            " installed yet: " + "; ".join(reasons) + ".")
