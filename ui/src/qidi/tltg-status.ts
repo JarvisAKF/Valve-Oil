@@ -1,7 +1,6 @@
-// Ported from the Valve Oil Fluidd fork (GPL-3.0), src/util/tltg-status.ts on
-// github.com/thelegendtubaguy/fluidd qidi, ported with the section before the fork release that adds it. Keep behavior
-// in step with the fork. Unchanged from the fork; Valve Oil UI passes its Moonraker's origin as apiUrl, and no token,
-// as it has no Moonraker login.
+// Ported from the Valve Oil Fluidd fork (GPL-3.0), src/util/tltg-status.ts at
+// github.com/thelegendtubaguy/fluidd qidi@6405679. Unchanged from the fork; keep it in step. Valve Oil UI passes its
+// Moonraker's origin as apiUrl, and no token, as it has no Moonraker login.
 //
 // Client for Valve Oil's status service (tltg-status), which the nginx serving Fluidd on the printer exposes at
 // /tltg-status/api. It reports the installed Valve Oil release, the printer's QIDI firmware, each board's firmware,
@@ -68,6 +67,55 @@ export interface TltgStatusPending {
   reinstall: boolean;
   /** Empty when automatic updates are off, or when it can run at the next check. */
   blocked_by: TltgStatusBlocker[];
+}
+
+export type TltgProgressState = 'running' | 'succeeded' | 'failed' | 'interrupted' | 'handed_off'
+export type TltgProgressOrigin = 'ssh' | 'usb' | 'automatic' | 'firmware_update'
+
+/** An install's steps (installer/runtime/progress.py), however it was started. */
+export interface TltgStatusProgress {
+  /** interrupted: recorded as running, but its process is gone; handed_off: a QIDI firmware update carries it on. */
+  state: TltgProgressState;
+  origin: TltgProgressOrigin | null;
+  steps: string[];
+  /** 1-based place of the current step; 0 before the first. */
+  index: number;
+  /** What the current step is doing now, such as "restarting Moonraker". */
+  detail: string | null;
+  from_version: string | null;
+  to_version: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  /** The run's log in Moonraker's logs folder, only when its name is a run log's. */
+  log: string | null;
+}
+
+const PROGRESS_STATES: TltgProgressState[] = ['running', 'succeeded', 'failed', 'interrupted', 'handed_off']
+const PROGRESS_ORIGINS: TltgProgressOrigin[] = ['ssh', 'usb', 'automatic', 'firmware_update']
+/** installer/runtime/run_log.py names a run's log valve-oil-<mode>-<YYYYmmdd-HHMMSS>[-<n>].log. */
+export const TLTG_RUN_LOG_NAME = /^valve-oil-[a-z-]+-\d{8}-\d{6}(-\d+)?\.log$/
+
+const parseProgress = (value: unknown): TltgStatusProgress | null => {
+  if (!isRecord(value) || !PROGRESS_STATES.includes(value.state as TltgProgressState)) {
+    return null
+  }
+
+  const steps = Array.isArray(value.steps) ? value.steps.filter((step): step is string => typeof step === 'string' && step !== '') : []
+  const index = typeof value.index === 'number' && Number.isInteger(value.index) && value.index >= 0 && value.index <= steps.length ? value.index : 0
+  const log = optionalText(value.log)
+
+  return {
+    state: value.state as TltgProgressState,
+    origin: PROGRESS_ORIGINS.includes(value.origin as TltgProgressOrigin) ? value.origin as TltgProgressOrigin : null,
+    steps,
+    index,
+    detail: optionalText(value.detail),
+    from_version: optionalText(value.from_version),
+    to_version: optionalText(value.to_version),
+    started_at: optionalText(value.started_at),
+    finished_at: optionalText(value.finished_at),
+    log: log != null && TLTG_RUN_LOG_NAME.test(log) ? log : null
+  }
 }
 
 export interface TltgStatusBoard {
@@ -155,6 +203,8 @@ export interface TltgStatus {
   pending: TltgStatusPending[];
   boards: TltgStatusBoard[];
   run: TltgStatusRun | null;
+  /** The install running now, or the last one, step by step; null from a service that doesn't say. */
+  progress: TltgStatusProgress | null;
   job: TltgStatusJob | null;
   busy: boolean;
   printer_busy: boolean;
@@ -593,6 +643,7 @@ export const parseTltgStatus = (value: unknown): TltgStatus | null => {
   const autoUpdate = record(value.auto_update)
   const check = record(value.check)
   const run = parseRun(value.run)
+  const progress = parseProgress(value.progress)
   const job = parseJob(value.job)
   const support = record(value.support)
   const seen = new Set<string>()
@@ -636,8 +687,9 @@ export const parseTltgStatus = (value: unknown): TltgStatus | null => {
         return true
       }),
     run,
+    progress,
     job,
-    busy: value.busy === true || run?.state === 'running' || job?.state === 'running',
+    busy: value.busy === true || run?.state === 'running' || job?.state === 'running' || progress?.state === 'running',
     printer_busy: value.printer_busy === true,
     update_now: parseUpdateNow(value.update_now),
     support_issue_url: tltgIssueUrlValid(support.issue_url) ? support.issue_url : null
