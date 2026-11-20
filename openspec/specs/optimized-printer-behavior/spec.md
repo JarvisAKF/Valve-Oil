@@ -109,14 +109,14 @@ OrcaSlicer and QIDI Studio packs SHALL implement the same functional print-start
 - **AND** first-layer temperature and the selected tool are established before front-bed priming
 
 #### Scenario: Existing printer state retains adaptive meshing
-- **WHEN** `tltg_start_bed_mesh_profile` is absent from Klipper saved variables or contains an empty string
+- **WHEN** `vo_start_bed_mesh_profile` is absent from Klipper saved variables or contains an empty string
 - **THEN** optimized print start reports fresh adaptive `kamp` calibration to the Klipper console
 - **AND** it performs fresh adaptive `kamp` calibration
 - **AND** the behavior applies to existing sliced files and both repository slicer packs
 - **AND** the behavior applies to retained Box filament, fresh Box filament, and external-spool starts
 
 #### Scenario: Named saved profile is selected persistently
-- **WHEN** `tltg_start_bed_mesh_profile` contains a non-empty profile name
+- **WHEN** `vo_start_bed_mesh_profile` contains a non-empty profile name
 - **AND** the named saved profile exists
 - **THEN** optimized print start reports the named saved profile to the Klipper console
 - **AND** it clears stale active mesh state and asks Klipper to load that exact profile name
@@ -125,13 +125,13 @@ OrcaSlicer and QIDI Studio packs SHALL implement the same functional print-start
 - **AND** the behavior applies to retained Box filament, fresh Box filament, and external-spool starts
 
 #### Scenario: Named profile is unavailable
-- **WHEN** `tltg_start_bed_mesh_profile` contains a non-empty profile name
+- **WHEN** `vo_start_bed_mesh_profile` contains a non-empty profile name
 - **AND** Klipper cannot load that saved profile name
 - **THEN** print preparation stops with Klipper's profile-load error
 - **AND** it does not silently continue without mesh compensation or create a new mesh
 
 #### Scenario: Saved-profile preference is operator-controlled
-- **WHEN** the operator saves a non-empty string to `tltg_start_bed_mesh_profile`
+- **WHEN** the operator saves a non-empty string to `vo_start_bed_mesh_profile`
 - **THEN** subsequent optimized starts use that named profile until the saved value changes
 - **AND** saving an empty string restores fresh adaptive calibration
 - **AND** installation does not create or overwrite the optional preference
@@ -150,6 +150,11 @@ OrcaSlicer and QIDI Studio packs SHALL implement the same functional print-start
 - **WHEN** the Box is unavailable or disabled
 - **THEN** retained Box state is invalidated and Box load or purge actions are not called
 - **AND** non-extruding rear cleaning uses the same cable-chain orientation and stock Y395–Y397 scrape footprint before common print preparation
+
+#### Scenario: Exhaust fan is off when printing begins
+- **WHEN** print start has turned the exhaust fan on at full speed after the purge or nozzle cleaning because there is no chamber target
+- **THEN** OrcaSlicer start G-code ends by turning the exhaust fan off
+- **AND** OrcaSlicer's own exhaust command, written after the start G-code when a used filament has air filtration on during the print, still sets the print's exhaust speed
 
 #### Scenario: Prime line remains first-layer aware
 - **WHEN** common preparation completes
@@ -232,19 +237,19 @@ Optimized macros SHALL keep external-spool runout policy independent from vendor
 - **AND** an external-spool print with automatic external pause enabled resumes only through a path that refuses to continue while the toolhead sensor reports no filament
 
 #### Scenario: Absent runtime preference disables retention
-- **WHEN** `tltg_keep_loaded_between_prints` is absent from Klipper saved variables or does not equal `1`
+- **WHEN** `vo_keep_loaded_between_prints` is absent from Klipper saved variables or does not equal `1`
 - **THEN** normal optimized print completion clears retained-filament state and delegates cutting and unloading to the existing QIDI Box sequence
 - **AND** runout sensors are disabled before the intentional end-of-print unload so it cannot pause the remaining shutdown routine
 - **AND** optimized print start does not reuse retained filament
 
 #### Scenario: Retention follows the synchronized physical slot
-- **WHEN** `tltg_keep_loaded_between_prints` equals `1`
+- **WHEN** `vo_keep_loaded_between_prints` equals `1`
 - **AND** normal end-print retention runs with Box filament loaded
 - **THEN** retained tool, slot, material, and vendor identity derive from the synchronized physical slot and current mapping
 - **AND** unload clears retained state before vendor unload while preserving caller motion and extrusion modes
 
 #### Scenario: Retention preference is operator-controlled
-- **WHEN** the operator saves `1` or `0` to `tltg_keep_loaded_between_prints`
+- **WHEN** the operator saves `1` or `0` to `vo_keep_loaded_between_prints`
 - **THEN** subsequent optimized starts and normal completions respectively enable or disable retention until the saved value changes
 - **AND** installation initializes an absent preference to `1` and does not overwrite an existing value
 
@@ -343,7 +348,7 @@ Optimized cut, purge, cooldown, cleaning, calibration, and cancel helpers SHALL 
 - **THEN** the toolhead reaches the chute, filament preparation and heater shutdown occur, and staged cooling and wiping complete before print end
 - **AND** bed lowering follows the shared slicer rule
 - **AND** delayed fan shutdown cannot turn off a fan used by a new or paused print
-- **AND** OrcaSlicer may apply configured completion exhaust while QIDI Studio passes zero and omits unsupported indexed completion-air placeholders
+- **AND** OrcaSlicer applies the configured completion exhaust only when the last filament has both air filtration and its on-completion option on, while QIDI Studio passes zero and omits unsupported indexed completion-air placeholders
 
 #### Scenario: Error cancellation is motion-free
 - **WHEN** optimized error cancellation executes
@@ -356,11 +361,11 @@ Optimized cut, purge, cooldown, cleaning, calibration, and cancel helpers SHALL 
 - **AND** each helper validates required printer state and hardware bounds before acting
 
 ### Requirement: Paused prints cancel after the pause timeout
-A paused print's idle timeout SHALL be the hours in the `tltg_pause_timeout_hours` saved variable, or QIDI's 72 when it is absent or not a positive number. When that idle timeout runs out with the print still paused, the print SHALL be cancelled as Fluidd's cancel does.
+A paused print's idle timeout SHALL be the hours in the `vo_pause_timeout_hours` saved variable, or QIDI's 72 when it is absent or not a positive number. When that idle timeout runs out with the print still paused, the print SHALL be cancelled as Fluidd's cancel does.
 
 #### Scenario: Pause sets the timeout
 - **WHEN** `PAUSE` pauses a print, including a `PAUSE` that fails after pausing
-- **THEN** Klipper's idle timeout becomes `tltg_pause_timeout_hours` hours, or 72 hours
+- **THEN** Klipper's idle timeout becomes `vo_pause_timeout_hours` hours, or 72 hours
 - **AND** a `PAUSE` while already paused leaves the timeout unchanged
 
 #### Scenario: Timeout on a paused print
@@ -544,7 +549,7 @@ Optimized configuration SHALL record which QIDI Box slot's own motion brought fi
 
 #### Scenario: A slot motion brings filament to the hub
 - **WHEN** a slot's own motion starts with the hub sensor clear and ends with filament at it, such as the automatic slot load on insertion or a load
-- **THEN** that slot is saved as `tltg_box_hub_slot`
+- **THEN** that slot is saved as `vo_box_hub_slot`
 - **AND** a slot motion that ends with the hub clear clears it
 
 #### Scenario: The recorded slot still has filament
@@ -730,7 +735,7 @@ Optimized configuration SHALL keep an operator-assigned Spoolman spool for each 
 - **THEN** the change is applied once Moonraker accepts it, without console errors
 
 #### Scenario: Assigning spools
-- **WHEN** the operator runs `TLTG_SPOOLMAN_SLOT` with a slot number and spool ID, with only a spool ID, or with `RESET=1`
+- **WHEN** the operator runs `VO_SPOOLMAN_SLOT` with a slot number and spool ID, with only a spool ID, or with `RESET=1`
 - **THEN** the named slot, the loaded slot, or every slot is assigned or cleared, the assignment is saved, and the active spool is updated immediately
 - **AND** without parameters the command lists the assignments and the loaded slot, and names a missing Moonraker Spoolman connection
 
@@ -813,12 +818,49 @@ The optional X/Y step-loss monitor SHALL stay inert until its saved variable ena
 - **WHEN** the saved variable is absent or false, X or Y is not homed, or the printer has no QIDI closed-loop X/Y drivers
 - **THEN** the monitor sends nothing to the drivers
 
+### Requirement: X/Y homing guard
+On printers with QIDI's closed-loop X/Y drivers, the X/Y homing guard SHALL stop an X or Y homing touch whose motor falls behind before its driver reports the end of the axis, and QIDI's closed-loop homing SHALL back off and touch again, homing X first when Y is stopped twice. The guard SHALL be on unless its saved variable turns it off, and SHALL send only the position-error query, and only to the other X/Y motor's driver.
+
+#### Scenario: Touches are no longer than the axis
+- **WHEN** a closed-loop X or Y touch starts
+- **THEN** it drives no further than the axis range (`position_max` minus `position_min`) and 6 mm, whether or not the guard is on
+- **AND** a touch after a back-off may drive that far too, so a touch the driver ended away from the frame is followed by one that reaches it
+
+#### Scenario: Blocked touch is stopped and retried
+- **WHEN** the guard is on and, during an X or Y homing move, the other X/Y motor's position error is at least 8 electrical cycles (8192 counts) from its first read in that move
+- **THEN** the guard triggers the move's endstop trsync from the host, so the mainboard stops the motors at once
+- **AND** homing takes the toolhead to be at the end of that axis, backs off by `homing_retract_dist`, arms the driver again, and repeats the touch
+- **AND** the console says the touch was stopped, how far the motor fell behind, and that the axis is homing again
+
+#### Scenario: Second blocked Y touch homes X first
+- **WHEN** the repeated Y touch is stopped the same way and X has not homed during this Y home
+- **THEN** homing backs off Y by `homing_retract_dist`, homes X, and repeats the Y touch with X at its homed position
+- **AND** the console says X homes before Y homes again
+
+#### Scenario: Blocked touches that recovery did not clear fail homing
+- **WHEN** the repeated X touch is stopped the same way, the Y touch after X homed is stopped, or a repeated Y touch is stopped after X homed during this Y home
+- **THEN** homing fails with an error that names the axis, says it happened twice or again after homing X, and asks to check for obstructions and belt tension
+
+#### Scenario: Drivers stop answering during a touch
+- **WHEN** the guard is on and two position-error queries in a row go unanswered during an X or Y homing move
+- **THEN** the guard triggers the move's endstop trsync from the host
+- **AND** homing fails at once, without another touch, with an error saying the motor drivers stopped answering
+
+#### Scenario: Touch ending normally
+- **WHEN** the driver ends an X or Y homing move before the motor falls 8 cycles behind
+- **THEN** the guard changes nothing about homing
+- **AND** `klippy.log` gets one line for the move with the number of reads, unanswered requests, the time to the first reply, the first reading, and the largest deviation in counts and millimeters of belt
+
+#### Scenario: Guard off or unsupported
+- **WHEN** the saved variable `vo_homing_guard` is false, the move homes Z or probes, or the printer has no QIDI closed-loop X/Y drivers
+- **THEN** the guard sends the drivers nothing and homing behaves as without it
+
 ### Requirement: QIDI RS-485 device evidence
-The optimized configuration SHALL detect QIDI RS-485 Boxes, buffers, and racks, and evidence that one was attached, without changing how QIDI's code talks to them. Once detected, it SHALL record RS-485 frames in both directions, QIDI's RS-485 log lines, and status changes outside `klippy.log`, keep a shareable report current, and ask once per Klipper start for an issue. Chip ids and USB serial numbers SHALL be salted hashes. `TLTG_RS_BOX_REPORT` SHALL write the report on demand.
+The optimized configuration SHALL detect QIDI RS-485 Boxes, buffers, and racks, and evidence that one was attached, without changing how QIDI's code talks to them. Once detected, it SHALL record RS-485 frames in both directions, QIDI's RS-485 log lines, and status changes outside `klippy.log`, keep a shareable report current, and ask once per Klipper start for an issue. Chip ids and USB serial numbers SHALL be salted hashes. `VO_RS_BOX_REPORT` SHALL write the report on demand.
 
 #### Scenario: Printer without RS-485 hardware
 - **WHEN** no RS-485 adapter, device, or saved RS-485 Box id is present
-- **THEN** no RS-485 log, report, or salt file is written unless `TLTG_RS_BOX_REPORT` runs
+- **THEN** no RS-485 log, report, or salt file is written unless `VO_RS_BOX_REPORT` runs
 - **AND** QIDI's code retries its missing adapter every 30 s instead of every 2 s, and detection runs every minute instead of every 10 s, until RS-485 hardware is seen
 
 #### Scenario: RS-485 hardware is attached
@@ -877,6 +919,24 @@ Optimized configuration SHALL make `SAVE_VARIABLE` and the vendor Box modules' o
 #### Scenario: Box print start and tool changes
 - **WHEN** `box_extras` or `box2base` `save_variable`, or `box485` `_save_variable`, saves retry, runout, slot, and tool-change variables, most of them unchanged
 - **THEN** only saves that change the file write it, and the file and saved values match what the vendor save produces, including a mixed-case name such as `BOX_DRYING_ROLL_ENABLE`
+
+### Requirement: Earlier command names
+Optimized configuration SHALL answer to the `TLTG_` and `OPTIMIZED_` names its commands and print macros had before 26.11.18.2 by running the `VO_` command each became and saying the new name, unless another command already has the earlier name or the printer lacks the new command. The `OPTIMIZED_` macros the slicer packs call SHALL keep their names.
+
+#### Scenario: Earlier command name
+- **WHEN** an operator, macro button, or vendor-file patch runs `TLTG_BED_SOAK BED=60`
+- **THEN** `VO_BED_SOAK BED=60` runs and the console says `TLTG_BED_SOAK is now VO_BED_SOAK.`
+
+### Requirement: Earlier saved-variable names
+When Klipper starts, optimized configuration SHALL save each saved variable named `tltg_<name>` whose `vo_<name>` is not saved under `vo_<name>` with the same value, and SHALL keep the `tltg_` variable.
+
+#### Scenario: Settings from an earlier release
+- **WHEN** Klipper starts with `tltg_keep_loaded_between_prints = 0` saved and no `vo_keep_loaded_between_prints`
+- **THEN** `vo_keep_loaded_between_prints = 0` is saved, the macros use it, and `tltg_keep_loaded_between_prints` stays for an earlier release
+
+#### Scenario: Setting already saved under its new name
+- **WHEN** both `tltg_<name>` and `vo_<name>` are saved
+- **THEN** neither is changed
 
 ### Requirement: QIDI Box heater refresh
 Optimized configuration SHALL make each USB QIDI Box heater resend an unchanged output at most about one second after the last one it sent, so that a Klipper main-loop stall of up to about three seconds does not let the Box MCU's 5 s heater limit expire. Other heaters, heater limits, and heater verification SHALL be unchanged.
@@ -1113,21 +1173,21 @@ When the same fix is in place, a toolhead move in normal printing that does not 
 - **THEN** it is queued as one move
 
 ### Requirement: Sweeping resonance test
-Optimized configuration SHALL run upstream Klipper's sweeping resonance test for `SHAPER_CALIBRATE` and `TEST_RESONANCES` unless the saved variable `tltg_resonance_sweep` is false or the command passes `SWEEPING_PERIOD=0`, in which case the vendor test SHALL run unchanged.
+Optimized configuration SHALL run upstream Klipper's sweeping resonance test for `SHAPER_CALIBRATE` and `TEST_RESONANCES` unless the saved variable `vo_resonance_sweep` is false or the command passes `SWEEPING_PERIOD=0`, in which case the vendor test SHALL run unchanged.
 
 #### Scenario: Changed vendor Klipper
 - **WHEN** the vendor resonance tester, junction calculation, `M204`, or calibration-data normalization differs from the original this was written for
 - **THEN** the vendor test stays in place and `klippy.log` says which code differs
 
 #### Scenario: Default calibration
-- **WHEN** `SHAPER_CALIBRATE` runs with no sweeping parameters and `tltg_resonance_sweep` absent or true
+- **WHEN** `SHAPER_CALIBRATE` runs with no sweeping parameters and `vo_resonance_sweep` absent or true
 - **THEN** the vendor vibration sweep runs with a slow 400 mm/s² back-and-forth of 1.2 s period added, along the tested axis only
 - **AND** each move starts at the speed the previous one was planned to end at, with junctions planned as upstream does, for that run only
 - **AND** that run's calibration data fades out below 10 Hz instead of being zeroed below 5 Hz
 - **AND** the console names the test and its `ACCEL_PER_HZ`, `SWEEPING_PERIOD`, and `SWEEPING_ACCEL`
 
 #### Scenario: Sweeping off
-- **WHEN** `tltg_resonance_sweep` is false, or the command passes `SWEEPING_PERIOD=0`
+- **WHEN** `vo_resonance_sweep` is false, or the command passes `SWEEPING_PERIOD=0`
 - **THEN** the vendor test runs with its own moves and calibration data, at the command's `ACCEL_PER_HZ` when given
 
 #### Scenario: Default test beyond the acceleration limit
@@ -1441,5 +1501,5 @@ The optimized macros SHALL run `Z_TILT_ADJUST` only when Klipper has a `z_tilt` 
 - **THEN** it skips the Z tilt step and its sub-status and continues to the bed mesh
 
 #### Scenario: Bed screw check without screw positions
-- **WHEN** `TLTG_CORNER_BED_SCREW_CHECK` runs on a printer without `[screws_tilt_adjust]`
+- **WHEN** `VO_CORNER_BED_SCREW_CHECK` runs on a printer without `[screws_tilt_adjust]`
 - **THEN** it stops before homing and says the printer has no bed screw positions set up

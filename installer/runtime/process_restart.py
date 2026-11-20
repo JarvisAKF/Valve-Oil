@@ -155,12 +155,23 @@ def restart_pending(
 ) -> bool:
     if attempts <= 0:
         raise ValueError("attempts must be positive")
-    marker = load_restart_marker(paths, allowed_entries=allowed_entries)
-    for target in marker["targets"]:
+    try:
+        marker = load_restart_marker(paths, allowed_entries=allowed_entries)
+    except ProcessRestartError:
+        marker = None
+    stale = marker is None
+    for target in marker["targets"] if marker is not None else ():
         path = destination_path(paths, target["destination"])
         ensure_external_path_has_no_symlink_components(root=paths.managed_klipper_root, target=path)
         if not path.is_file() or path.is_symlink() or sha256_bytes(path.read_bytes()) != target["sha256"]:
-            raise ProcessRestartError(f"Pending Klipper source has drifted: {target['destination']}")
+            stale = True
+    if stale:
+        # A marker another release wrote, or one written just before a run that stopped before changing its files,
+        # no longer says what Klipper must load. Restarting Klipper still loads whatever is there, which is all it
+        # asked for; keeping it would stop every later run.
+        restart_klipper_service(paths, urlopen=urlopen, sleep=sleep, attempts=attempts)
+        atomic_delete(paths.restart_marker_path)
+        return True
     pre_restart_pid = marker["pre_restart_process_id"]
     current = _read_printer_info_with_retry(
         paths.moonraker_url, urlopen=urlopen, sleep=sleep, attempts=attempts
@@ -193,7 +204,8 @@ def restart_klipper_service(
     )
 
 
-def _restart_service_until_ready(paths, *, pre_restart_pid: int, urlopen, sleep, attempts: int) -> None:
+def request_klipper_restart(paths, *, urlopen=urllib.request.urlopen) -> None:
+    """Ask Moonraker to restart the Klipper service, without waiting for it."""
     request = urllib.request.Request(
         service_restart_url(paths.moonraker_url),
         data=b'{"service":"klipper"}',
@@ -205,6 +217,10 @@ def _restart_service_until_ready(paths, *, pre_restart_pid: int, urlopen, sleep,
             response.read()
     except (OSError, urllib.error.URLError, ValueError) as exc:
         raise ProcessRestartError("Could not request Klipper service restart.") from exc
+
+
+def _restart_service_until_ready(paths, *, pre_restart_pid: int, urlopen, sleep, attempts: int) -> None:
+    request_klipper_restart(paths, urlopen=urlopen)
     for attempt in range(attempts):
         try:
             pid, state = read_printer_info(paths.moonraker_url, urlopen=urlopen)

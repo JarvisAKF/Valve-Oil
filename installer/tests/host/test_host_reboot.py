@@ -1,0 +1,458 @@
+from __future__ import annotations
+
+import io
+import subprocess
+import unittest
+from datetime import datetime, timezone
+from pathlib import Path
+
+from installer.runtime import host_reboot
+from installer.runtime.host_reboot import (
+    HostRebootError,
+    arm_auto_update_reboot_followup,
+    maybe_schedule_host_reboot,
+    maybe_schedule_recommended_reboot,
+    perform_scheduled_host_reboot,
+    read_host_reboot_marker,
+    recommend_reboot,
+    schedule_reboot_after_firmware_update,
+    verify_completed_host_reboot,
+    write_host_reboot_marker,
+)
+from installer.runtime.models import RuntimePaths
+from installer.runtime.reporter import PlainReporter
+from installer.tests.helpers import _JsonResponse, add_merged_usr, moonraker_urlopen, temp_path
+from installer.runtime import boot_path
+
+
+class HostRebootTests(unittest.TestCase):
+    def setUp(self):
+        self.root = temp_path("host-reboot-test-")
+        self.boot_id = self.root / "boot-id"
+        self.boot_id.write_text("boot-one\n", encoding="utf-8")
+        self.paths = RuntimePaths(
+            bundle_root=self.root / "bundle",
+            installer_root=self.root / "bundle/installer",
+            printer_data_root=self.root / "printer_data",
+            config_root=self.root / "printer_data/config",
+            firmware_manifest_path=self.root / "firmware.json",
+            moonraker_url="http://moonraker.invalid/query",
+            lock_path=self.root / "printer_data/lock",
+            recovery_sentinel_path=self.root / "printer_data/recovery",
+            backup_root=self.root / "printer_data",
+            boot_id_path_override=self.boot_id,
+        )
+
+    def _write_marker(self, **kwargs):
+        return write_host_reboot_marker(
+            self.paths,
+            package_version="1.2.3",
+            source=kwargs.pop("source", "interactive_install"),
+            now=lambda: datetime(2026, 7, 26, 12, 0, tzinfo=timezone.utc),
+            **kwargs,
+        )
+
+    def test_marker_is_cleared_only_after_successful_post_reboot_verification(self):
+        self._write_marker()
+        marker = read_host_reboot_marker(self.paths)
+        self.assertEqual(marker.boot_id, "boot-one")
+        self.assertEqual(self.paths.host_reboot_marker_path.stat().st_mode & 0o777, 0o600)
+
+        self.boot_id.write_text("boot-two\n", encoding="utf-8")
+        with self.assertRaises(HostRebootError):
+            verify_completed_host_reboot(
+                self.paths,
+                verify_operation=lambda: (_ for _ in ()).throw(RuntimeError("failed")),
+                reporter=PlainReporter(io.StringIO()),
+            )
+        self.assertTrue(self.paths.host_reboot_marker_path.exists())
+
+        self.assertTrue(
+            verify_completed_host_reboot(
+                self.paths,
+                verify_operation=lambda: None,
+                reporter=PlainReporter(io.StringIO()),
+            )
+        )
+        self.assertFalse(self.paths.host_reboot_marker_path.exists())
+
+    def test_idle_reboot_is_delayed_and_rechecks_printer_state_before_execution(self):
+        self._write_marker()
+        calls: list[list[str]] = []
+
+        def run(command, **kwargs):
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        self.assertTrue(
+            maybe_schedule_host_reboot(
+                self.paths,
+                reporter=PlainReporter(io.StringIO()),
+                input_stream=None,
+                environ={},
+                automatic=True,
+                urlopen=moonraker_urlopen("standby"),
+                run=run,
+            )
+        )
+        self.assertIn("systemd-run", calls[1])
+        self.assertIn("--on-active=5s", calls[1])
+        self.assertNotIn("reboot", calls[1])
+
+        calls.clear()
+        self.assertFalse(
+            perform_scheduled_host_reboot(
+                self.paths,
+                reporter=PlainReporter(io.StringIO()),
+                environ={},
+                urlopen=moonraker_urlopen("printing"),
+                run=run,
+            )
+        )
+        self.assertEqual(calls, [])
+
+        self.assertTrue(
+            perform_scheduled_host_reboot(
+                self.paths,
+                reporter=PlainReporter(io.StringIO()),
+                environ={},
+                urlopen=moonraker_urlopen("standby"),
+                run=run,
+            )
+        )
+        self.assertEqual(calls[-1][-2:], ["systemctl", "reboot"])
+
+    def test_a_printer_that_would_not_start_again_is_never_rebooted(self):
+        # QIDI's Format External Storage replaced /sbin with a directory: no /sbin/init, so the next start would stop
+        # at the boot logo. No reboot path restarts it, whoever asks.
+        system = add_merged_usr(self.root / "system")
+        (system / "sbin").unlink()
+        (system / "sbin").mkdir()
+        environ = {boot_path.SYSTEM_ROOT_ENV: str(system)}
+        self._write_marker()
+        recommend_reboot(self.paths)
+        calls: list[list[str]] = []
+
+        def run(command, **kwargs):
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        stream = io.StringIO()
+        reporter = PlainReporter(stream)
+        self.assertFalse(maybe_schedule_host_reboot(self.paths, reporter=reporter, input_stream=None, environ=environ,
+                                                    automatic=True, urlopen=moonraker_urlopen("standby"), run=run))
+        self.assertFalse(maybe_schedule_recommended_reboot(self.paths, reporter=reporter, input_stream=None,
+                                                           environ=environ, urlopen=moonraker_urlopen("standby"),
+                                                           run=run))
+        self.assertFalse(maybe_schedule_host_reboot(self.paths, reporter=reporter, input_stream=None, environ=environ,
+                                                    explicit=True, urlopen=moonraker_urlopen("standby"), run=run))
+        for recommended in (False, True):
+            self.assertFalse(perform_scheduled_host_reboot(self.paths, reporter=reporter, environ=environ,
+                                                           recommended=recommended, require_ready=False,
+                                                           urlopen=moonraker_urlopen("standby"), run=run))
+        self.assertFalse(schedule_reboot_after_firmware_update(self.paths, password="", run=run, reporter=reporter,
+                                                               environ=environ))
+        self.assertEqual(calls, [])
+        self.assertIn(boot_path.RECOVERY_DOC_URL, stream.getvalue())
+
+        # Put back, it reboots as before.
+        (system / "sbin").rmdir()
+        (system / "sbin").symlink_to("usr/sbin")
+        self.assertTrue(perform_scheduled_host_reboot(self.paths, reporter=reporter, environ=environ,
+                                                      urlopen=moonraker_urlopen("standby"), run=run))
+        self.assertEqual(calls[-1][-2:], ["systemctl", "reboot"])
+
+    def test_busy_unknown_or_not_ready_printer_leaves_reboot_pending(self):
+        # A run that leaves Klipper halted on an error or shut down is never followed by a reboot.
+        for name, urlopen in (
+            ("printing", moonraker_urlopen("printing")),
+            ("unknown", moonraker_urlopen(raw_payload={})),
+            ("halted", _klipper_not_ready("error")),
+            ("shut down", _klipper_not_ready("shutdown")),
+        ):
+            with self.subTest(name):
+                self._write_marker()
+                calls = []
+                report = io.StringIO()
+                self.assertFalse(
+                    maybe_schedule_host_reboot(
+                        self.paths,
+                        reporter=PlainReporter(report),
+                        input_stream=None,
+                        environ={},
+                        automatic=True,
+                        urlopen=urlopen,
+                        run=lambda command, **kwargs: calls.append(command),
+                    )
+                )
+                self.assertEqual(calls, [])
+                self.assertTrue(self.paths.host_reboot_marker_path.exists())
+                if name in ("halted", "shut down"):
+                    self.assertIn("The printer was not restarted: Klipper isn't ready", report.getvalue())
+                    # A scheduled reboot that finds Klipper not ready when it runs is held too.
+                    self.assertFalse(perform_scheduled_host_reboot(
+                        self.paths, reporter=PlainReporter(io.StringIO()), environ={}, urlopen=urlopen,
+                        run=lambda command, **kwargs: calls.append(command), **_Clock().seams()))
+                    self.assertEqual(calls, [])
+
+    def test_a_reboot_the_operator_approved_does_not_wait_for_klipper(self):
+        self._write_marker()
+        calls: list[list[str]] = []
+
+        def run(command, **kwargs):
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        self.assertTrue(maybe_schedule_host_reboot(
+            self.paths, reporter=PlainReporter(io.StringIO()), input_stream=None, environ={}, explicit=True,
+            urlopen=_klipper_not_ready("error"), run=run))
+        self.assertIn("--operator-approved", calls[-1])
+        self.assertTrue(perform_scheduled_host_reboot(
+            self.paths, reporter=PlainReporter(io.StringIO()), environ={}, require_ready=False,
+            urlopen=_klipper_not_ready("error"), run=run))
+        self.assertEqual(calls[-1][-2:], ["systemctl", "reboot"])
+
+    def test_idle_check_reads_the_printer_again_when_klipper_goes_away_between_its_reads(self):
+        # QIDI's touchscreen app restarts Klipper as it starts; a read that fails meanwhile is not the answer.
+        from unittest import mock
+
+        from installer.runtime import safety
+        from installer.runtime.errors import HeaterOnError, PrinterStateError
+
+        def flaky(targets):
+            answers = moonraker_urlopen("standby", heater_targets=targets)
+            failed = []
+
+            def urlopen(request, timeout=0):
+                url = getattr(request, "full_url", str(request))
+                if "heater_bed" in url and not failed:
+                    failed.append(url)
+                    raise OSError("Klippy Disconnected")
+                return answers(request, timeout=timeout)
+
+            return urlopen
+
+        with mock.patch.object(safety.time, "sleep"):
+            with self.assertRaises(PrinterStateError):
+                safety.ensure_printer_idle(self.paths.moonraker_url, urlopen=flaky({"heater_bed": 0.0}))
+            self.assertEqual(
+                safety.ensure_printer_idle(
+                    self.paths.moonraker_url, urlopen=flaky({"heater_bed": 0.0}), wait_seconds=30.0
+                ),
+                "standby",
+            )
+            with self.assertRaises(HeaterOnError):
+                safety.ensure_printer_idle(
+                    self.paths.moonraker_url, urlopen=flaky({"heater_bed": 60.0}), wait_seconds=30.0
+                )
+
+    def test_auto_update_arms_followup_without_rebooting(self):
+        self.paths.bundle_root.mkdir(parents=True)
+        (self.paths.bundle_root / "auto-update.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+        self._write_marker(source="auto_update_child", auto_update_checksum_before="a" * 64)
+        calls: list[list[str]] = []
+
+        self.assertTrue(
+            arm_auto_update_reboot_followup(
+                self.paths,
+                reporter=PlainReporter(io.StringIO()),
+                environ={},
+                run=lambda command, **kwargs: (
+                    calls.append(command) or subprocess.CompletedProcess(command, 0)
+                ),
+            )
+        )
+        self.assertIn("systemd-run", calls[1])
+        self.assertIn("--on-active=30s", calls[1])
+        self.assertNotIn("reboot", calls[1])
+
+    def test_recommended_reboot_is_scheduled_once_per_boot_and_rechecks_idle_before_rebooting(self):
+        calls: list[list[str]] = []
+
+        def run(command, **kwargs):
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        def schedule(state="standby"):
+            report = io.StringIO()
+            scheduled = maybe_schedule_recommended_reboot(
+                self.paths,
+                reporter=PlainReporter(report),
+                input_stream=None,
+                environ={},
+                urlopen=moonraker_urlopen(state),
+                run=run,
+            )
+            return scheduled, report.getvalue()
+
+        # Nothing applied, no reboot.
+        self.assertEqual(schedule(), (False, ""))
+        recommend_reboot(self.paths)
+        # During a print the installer says to reboot and does nothing else.
+        scheduled, report = schedule("printing")
+        self.assertFalse(scheduled)
+        self.assertIn("sudo reboot", report)
+        self.assertEqual(calls, [])
+        # Otherwise it reboots without asking, delayed through complete-host-reboot.
+        self.assertTrue(schedule()[0])
+        self.assertIn("--on-active=5s", calls[-1])
+        self.assertIn("complete-host-reboot", calls[-1])
+        calls.clear()
+        self.assertFalse(
+            perform_scheduled_host_reboot(
+                self.paths, reporter=PlainReporter(io.StringIO()), environ={}, recommended=True,
+                urlopen=moonraker_urlopen("printing"), run=run,
+            )
+        )
+        self.assertEqual(calls, [])
+        self.assertTrue(
+            perform_scheduled_host_reboot(
+                self.paths, reporter=PlainReporter(io.StringIO()), environ={}, recommended=True,
+                urlopen=moonraker_urlopen("standby"), run=run,
+            )
+        )
+        self.assertEqual(calls[-1][-2:], ["systemctl", "reboot"])
+        # Any reboot satisfies the recommendation.
+        self.boot_id.write_text("boot-two\n", encoding="utf-8")
+        self.assertEqual(schedule(), (False, ""))
+        self.assertFalse(self.paths.reboot_recommended_path.exists())
+
+    def test_automatic_update_reboots_only_after_klipper_has_been_idle(self):
+        def klipper(*, still_for=600.0, target=0.0, print_state="standby", command="Ready", webhooks="ready"):
+            return moonraker_urlopen(raw_payload={"result": {"status": {
+                "heaters": {"available_heaters": ["extruder", "heater_generic heater_box1"]},
+                "print_stats": {"state": print_state},
+                "webhooks": {"state": webhooks},
+                "idle_timeout": {"state": command},
+                "toolhead": {"print_time": 1000.0, "estimated_print_time": 1000.0 + still_for},
+                "extruder": {"target": 0.0},
+                "heater_generic heater_box1": {"target": target},
+            }}})
+
+        calls: list[list[str]] = []
+
+        def run(command, **kwargs):
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        recommend_reboot(self.paths)
+        self._write_marker(source="auto_update_reconcile")
+        busy = {
+            "moved recently": klipper(still_for=599.0),
+            "Box drying": klipper(target=50.0),
+            "running a command": klipper(command="Printing"),
+            "paused": klipper(print_state="paused"),
+            "shut down": klipper(webhooks="shutdown"),
+            "unreadable": moonraker_urlopen("standby"),
+        }
+        for reason, urlopen in busy.items():
+            with self.subTest(reason=reason):
+                self.assertFalse(maybe_schedule_recommended_reboot(
+                    self.paths, reporter=PlainReporter(io.StringIO()), input_stream=None, environ={},
+                    require_klipper_idle=True, urlopen=urlopen, run=run,
+                ))
+                self.assertFalse(maybe_schedule_host_reboot(
+                    self.paths, reporter=PlainReporter(io.StringIO()), input_stream=None, environ={},
+                    automatic=True, require_klipper_idle=True, urlopen=urlopen, run=run,
+                ))
+                self.assertFalse(perform_scheduled_host_reboot(
+                    self.paths, reporter=PlainReporter(io.StringIO()), environ={},
+                    require_klipper_idle=True, urlopen=urlopen, run=run, **_Clock().seams(),
+                ))
+                self.assertEqual(calls, [])
+
+        self.assertTrue(maybe_schedule_host_reboot(
+            self.paths, reporter=PlainReporter(io.StringIO()), input_stream=None, environ={},
+            automatic=True, require_klipper_idle=True, urlopen=klipper(), run=run,
+        ))
+        # The delayed reboot checks Klipper again before it runs.
+        self.assertEqual(calls[-1][-3:], ["complete-host-reboot", "--plain", "--require-klipper-idle"])
+        self.assertTrue(perform_scheduled_host_reboot(
+            self.paths, reporter=PlainReporter(io.StringIO()), environ={},
+            require_klipper_idle=True, urlopen=klipper(), run=run,
+        ))
+        self.assertEqual(calls[-1][-2:], ["systemctl", "reboot"])
+
+    def test_scheduled_reboot_reads_a_printer_that_is_starting_again_for_a_few_minutes(self):
+        # After a QIDI firmware update the touchscreen app restarts Klipper several times as it finds the boards.
+        self._write_marker()
+        calls: list[list[str]] = []
+
+        def run(command, **kwargs):
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        def starting(reads_until_ready):
+            unreadable, ready = moonraker_urlopen(raw_payload={}), moonraker_urlopen("standby")
+            reads = []
+
+            def urlopen(request, timeout=0):
+                reads.append(request)
+                return (unreadable if len(reads) <= reads_until_ready else ready)(request, timeout=timeout)
+
+            return urlopen
+
+        clock = _Clock()
+        self.assertTrue(perform_scheduled_host_reboot(
+            self.paths, reporter=PlainReporter(io.StringIO()), environ={}, urlopen=starting(5), run=run,
+            **clock.seams()))
+        self.assertEqual(calls[-1][-2:], ["systemctl", "reboot"])
+        self.assertLess(clock.now, host_reboot.STATE_WAIT_SECONDS)
+
+        calls.clear()
+        clock = _Clock()
+        report = io.StringIO()
+        self.assertFalse(perform_scheduled_host_reboot(
+            self.paths, reporter=PlainReporter(report), environ={}, urlopen=starting(10 ** 6), run=run,
+            **clock.seams()))
+        self.assertEqual(calls, [])
+        self.assertGreaterEqual(clock.now, host_reboot.STATE_WAIT_SECONDS)
+        self.assertIn("could not be verified", report.getvalue())
+        self.assertTrue(self.paths.host_reboot_marker_path.exists())
+
+    def test_a_firmware_update_schedules_the_reboot_its_install_needs(self):
+        calls: list[list[str]] = []
+
+        def run(command, **kwargs):
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        self.assertFalse(schedule_reboot_after_firmware_update(self.paths, password="x", run=run))
+        self.assertEqual(calls, [])
+        for pending in (recommend_reboot, lambda paths: self._write_marker(source="auto_update_child")):
+            with self.subTest(pending=pending):
+                pending(self.paths)
+                self.assertTrue(schedule_reboot_after_firmware_update(self.paths, password="x", run=run))
+                self.assertIn("systemd-run", calls[-1])
+                self.assertIn("--on-active=5s", calls[-1])
+                self.assertEqual(calls[-1][-2:], ["complete-host-reboot", "--plain"])
+
+
+class _Clock:
+    """time.monotonic and time.sleep for a run that waits."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def seams(self):
+        return {"sleep": self._sleep, "clock": lambda: self.now}
+
+    def _sleep(self, seconds):
+        self.now += seconds
+
+
+def _klipper_not_ready(state):
+    """Moonraker for a Klipper halted on an error (no print state) or shut down (print state kept)."""
+    answers = moonraker_urlopen("standby") if state == "shutdown" else moonraker_urlopen(raw_payload={"result": {}})
+
+    def urlopen(request, timeout=0):
+        url = getattr(request, "full_url", str(request))
+        if url.endswith("/printer/info"):
+            return _JsonResponse({"result": {"state": state, "state_message": "Klipper says why", "process_id": 1}})
+        return answers(request, timeout=timeout)
+
+    return urlopen
+
+
+if __name__ == "__main__":
+    unittest.main()

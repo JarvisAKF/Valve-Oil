@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // Ported from the Valve Oil Fluidd fork (GPL-3.0), src/util/qidi-box-task.ts at
-// github.com/thelegendtubaguy/fluidd qidi@1ad1676. Keep behavior in step with the fork.
+// github.com/thelegendtubaguy/fluidd qidi@6405679. Keep behavior in step with the fork.
 import { QIDI_BOX_EXTERNAL_SLOT, qidiBoxSlotLabel, qidiBoxSlotNumber, type QidiBoxSlot } from './qidi-box'
 
 // QIDI's Box flows (multi_color_controller.task) run a queue of steps. A failed step leaves the task paused on it
@@ -217,7 +217,7 @@ export const qidiBoxStrandedRecovery = (printer: Record<string, any>): boolean =
 export const qidiBoxHubSlot = (printer: Record<string, any>, slots: Pick<QidiBoxSlot, 'index' | 'present'>[]): number | null => {
   const variables = printer.save_variables?.variables ?? {}
   const present = slots.filter(slot => slot.index !== QIDI_BOX_EXTERNAL_SLOT && slot.present).map(slot => slot.index)
-  const named = [...new Set([boxSlot(variables.tltg_box_hub_slot), boxSlot(variables.last_load_slot)])]
+  const named = [...new Set([boxSlot(variables.vo_box_hub_slot), boxSlot(variables.last_load_slot)])]
     .filter((slot): slot is number => slot != null && present.includes(slot))
 
   if (named.length) return named.length === 1 ? named[0] : null

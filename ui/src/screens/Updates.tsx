@@ -1,24 +1,29 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
-import { ChevronDown, CircleAlert, CircleCheck, Cpu, ExternalLink, Info, LoaderCircle, RefreshCw, TriangleAlert, X } from 'lucide-react'
-import { Card, Dialog, Toggle } from '../components/ui'
+import { useEffect, useRef, useState } from 'react'
+import { ChevronDown, CircleCheck, Cpu, Download, ExternalLink, Info, LoaderCircle, TriangleAlert } from 'lucide-react'
+import { Card, Dialog, PageHeader, Toggle } from '../components/ui'
+import { Notice } from '../components/settings/common'
+import { LanOnly } from '../components/settings/LanOnly'
+import { Log } from '../components/settings/Addons'
+import { InstallStepsCard, InstallerLogsCard } from '../components/updates/Install'
+import { client } from '../state/printer'
 import {
-  TLTG_UPDATE_NOW_BLOCKERS,
-  tltgBrowserTimezone,
-  tltgHourLabel,
-  tltgSentence,
-  tltgUpdateWindowLabel,
-  tltgUpdateWindowValid,
-  type TltgBoardBadge,
-  type TltgBoardNote,
-  type TltgBoardView,
-  type TltgStatusBlocker,
-  type TltgStatusBoard,
-  type TltgStatusPending,
-  type TltgStatusUpdateWindow,
-  type TltgStatusView,
-  type TltgUpdateView,
-  type TltgUpdateWindowHours,
-} from '../qidi/tltg-status'
+  VO_UPDATE_NOW_BLOCKERS,
+  voBrowserTimezone,
+  voHourLabel,
+  voSentence,
+  voUpdateWindowLabel,
+  voUpdateWindowValid,
+  type VoBoardBadge,
+  type VoBoardNote,
+  type VoBoardView,
+  type VoStatusBlocker,
+  type VoStatusBoard,
+  type VoStatusPending,
+  type VoStatusUpdateWindow,
+  type VoStatusView,
+  type VoUpdateView,
+  type VoUpdateWindowHours,
+} from '../qidi/vo-status'
 import {
   autoUpdateDisabled,
   clearAutoUpdateError,
@@ -40,7 +45,7 @@ import {
   type ValveOilState,
 } from '../state/valve-oil'
 
-// The wording is the Fluidd fork's (app.tltg_valve_oil in src/locales/en.yaml there); keep the two in step.
+// The wording is the Fluidd fork's (app.vo_valve_oil in src/locales/en.yaml there); keep the two in step.
 
 const fmtTime = (ms: number) => new Date(ms).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })
 /** A time later today as just the time, and one on another day with its date. */
@@ -55,13 +60,13 @@ export function reconnectText(s: ValveOilState) {
   return minutes != null ? reconnectingLong(minutes) : RECONNECTING
 }
 
-const RUNNING: Record<TltgUpdateView['kind'], string> = {
+const RUNNING: Record<VoUpdateView['kind'], string> = {
   update_now: 'Updating…',
   automatic: 'Automatic update running…',
   install: 'The Valve Oil installer is running…',
   other: 'Updating…',
 }
-const RESULT: Record<Exclude<TltgUpdateView['state'], 'running'>, Record<TltgUpdateView['kind'], string>> = {
+const RESULT: Record<Exclude<VoUpdateView['state'], 'running'>, Record<VoUpdateView['kind'], string>> = {
   succeeded: { update_now: 'The update finished', automatic: 'The automatic update finished', install: 'The Valve Oil installer finished', other: 'The update finished' },
   failed: { update_now: 'The update failed', automatic: 'The automatic update failed', install: 'The Valve Oil installer failed', other: 'The update failed' },
   interrupted: {
@@ -72,7 +77,7 @@ const RESULT: Record<Exclude<TltgUpdateView['state'], 'running'>, Record<TltgUpd
   },
 }
 
-const BOARD_BADGE: Record<TltgBoardBadge, string> = {
+const BOARD_BADGE: Record<VoBoardBadge, string> = {
   current: 'Up to date',
   needs_image: 'Update waiting',
   after_firmware: 'Waiting for QIDI firmware',
@@ -82,7 +87,7 @@ const BOARD_BADGE: Record<TltgBoardBadge, string> = {
   touchscreen: 'Update from the touchscreen',
   unknown: 'Not checked',
 }
-const BOARD_TONE: Record<TltgBoardBadge, string> = {
+const BOARD_TONE: Record<VoBoardBadge, string> = {
   current: 'tone-good',
   needs_image: 'tone-accent',
   after_firmware: 'tone-accent',
@@ -99,25 +104,25 @@ const BOARD_BUILD: Record<string, string> = {
   superseded: 'An earlier Valve Oil build',
 }
 
-function boardFirmwareText(board: TltgStatusBoard) {
+function boardFirmwareText(board: VoStatusBoard) {
   const version = board.firmware ? `Firmware ${board.firmware}` : 'Firmware not read'
   const build = board.build ? BOARD_BUILD[board.build] : undefined
   return build ? `${version} · ${build}` : version
 }
 
-const BOARD_NOTE: Record<Exclude<TltgBoardNote, 'after_firmware'>, string> = {
+const BOARD_NOTE: Record<Exclude<VoBoardNote, 'after_firmware'>, string> = {
   unrecognized_bootloader:
-    "Valve Oil doesn't recognize this board's bootloader yet, so it doesn't update this board or the printer's QIDI firmware. Report it so a later release can support it.",
+    "Valve Oil doesn't recognize this board's bootloader yet, so it doesn't update this board or the printer's QIDI firmware. Open a support issue so a later release can support it.",
   unrecognized_bootloader_box:
-    "Valve Oil doesn't recognize this Box's bootloader yet, so it leaves this Box as it is and keeps updating the rest of the printer. Report it so a later release can support it.",
-  unrecognized_firmware: "This board runs firmware Valve Oil doesn't recognize, so Valve Oil leaves it as it is. A later release that recognizes it will update it.",
+    "Valve Oil doesn't recognize this Box's bootloader yet, so it leaves this Box as it is and keeps updating the rest of the printer. Open a support issue so a later release can support it.",
+  unrecognized_firmware: "This board runs firmware Valve Oil doesn't recognize, so Valve Oil leaves it as it is. Open a support issue so a later release can support it.",
   unknown: "Valve Oil hasn't been able to read this board's firmware yet.",
   held_box: "This Box was put back on QIDI's firmware. Valve Oil leaves it there until you install the next Valve Oil release.",
   held_closed_loop: "Valve Oil left the closed-loop motor drivers on their firmware. Update them from the touchscreen's firmware page.",
   held: "Valve Oil leaves this board's firmware as it is.",
 }
 
-function boardExplanation(board: TltgBoardView) {
+function boardExplanation(board: VoBoardView) {
   if (board.note === 'after_firmware')
     return `Valve Oil updates this board in the same update, right after it installs ${board.noteVersion ? `QIDI firmware ${board.noteVersion}` : 'the QIDI firmware update'}.`
   return board.note ? BOARD_NOTE[board.note] : ''
@@ -134,14 +139,14 @@ const UPDATE_NOW_BLOCKED: Record<string, string> = {
 }
 
 // A recovery is shown as the printer says it, as its message names what to run first.
-function blockedText(blockedBy: TltgStatusBlocker[]) {
+function blockedText(blockedBy: VoStatusBlocker[]) {
   if (blockedBy.length === 0) return 'Not available right now.'
   return blockedBy
-    .map((b) => (TLTG_UPDATE_NOW_BLOCKERS.includes(b.code) ? UPDATE_NOW_BLOCKED[b.code] : b.code === 'recovery_required' ? tltgSentence(b.message) : `Not available now: ${b.message}.`))
+    .map((b) => (VO_UPDATE_NOW_BLOCKERS.includes(b.code) ? UPDATE_NOW_BLOCKED[b.code] : b.code === 'recovery_required' ? voSentence(b.message) : `Not available now: ${b.message}.`))
     .join(' ')
 }
 
-function waitingText(item: TltgStatusPending, boards: TltgStatusBoard[]) {
+function waitingText(item: VoStatusPending, boards: VoStatusBoard[]) {
   const current = item.current ? ` (this printer has ${item.current})` : ''
   switch (item.kind) {
     case 'release':
@@ -156,7 +161,7 @@ function waitingText(item: TltgStatusPending, boards: TltgStatusBoard[]) {
   }
 }
 
-function noticeText(view: TltgStatusView) {
+function noticeText(view: VoStatusView) {
   switch (view.notice) {
     // Installing the installed release again says so, rather than "the update".
     case 'auto_off':
@@ -165,7 +170,7 @@ function noticeText(view: TltgStatusView) {
       return `Automatic updates are on, but ${view.reinstall ? "Valve Oil hasn't been installed again yet" : "the update hasn't been installed yet"}: ${view.reasons.join('; ')}.`
     case 'window': {
       const hours = view.updateWindow?.hours
-      const window = `${hours ? tltgUpdateWindowLabel(hours) : ''} ${view.updateWindow?.timezone ?? 'UTC'}`
+      const window = `${hours ? voUpdateWindowLabel(hours) : ''} ${view.updateWindow?.timezone ?? 'UTC'}`
       return view.reinstall
         ? `Automatic updates are on, so Valve Oil will be installed again during the update window, ${window}, while the printer is idle.`
         : `Automatic updates are on, so the update will be installed during the update window, ${window}, while the printer is idle.${view.firmwareWaiting ? " The printer can't be used while it installs." : ''}`
@@ -181,7 +186,7 @@ function noticeText(view: TltgStatusView) {
   }
 }
 
-function confirmText(view: TltgStatusView): { text: string; strong: boolean } {
+function confirmText(view: VoStatusView): { text: string; strong: boolean } {
   const release = view.waiting.find((item) => item.kind === 'release')
   if (view.updateNow.action === 'continue')
     return {
@@ -217,37 +222,47 @@ export function UpdatesScreen() {
   if (!view) {
     const text = reconnecting(s) ? reconnectText(s) : s.unavailable ? "Valve Oil's update status isn't available on this printer." : "Loading Valve Oil's status…"
     return (
-      <Card title="Valve Oil" icon={<RefreshCw size={14} />}>
-        <div className="flex items-start gap-2.5 text-ink-2">
-          {reconnecting(s) ? <LoaderCircle size={16} className="spin mt-0.5 flex-none" /> : <Info size={16} className="mt-0.5 flex-none text-ink-3" />}
-          <span>{text}</span>
-        </div>
-        {s.expectUpdate && reconnecting(s) && <div className="mt-2 font-medium text-warn">{DONT_POWER_OFF}</div>}
-      </Card>
+      <div className="grid content-start gap-3.5">
+        <PageHeader title="Updates" />
+        <Card>
+          <div className="flex items-start gap-2.5 text-ink-2">
+            {reconnecting(s) ? <LoaderCircle size={16} className="spin mt-0.5 flex-none" /> : <Info size={16} className="mt-0.5 flex-none text-ink-3" />}
+            <span>{text}</span>
+          </div>
+          {s.expectUpdate && reconnecting(s) && <div className="mt-2 font-medium text-warn">{DONT_POWER_OFF}</div>}
+        </Card>
+      </div>
     )
   }
 
   return (
-    <div className="grid content-start gap-3.5 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] xl:grid-cols-[minmax(0,1.25fr)_minmax(0,1fr)]">
-      <ValveOilCard s={s} view={view} />
-      <BoardsCard view={view} />
+    <div className="grid content-start gap-3.5">
+      <PageHeader title="Updates" />
+      <div className="grid content-start items-start gap-3.5 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] xl:grid-cols-[minmax(0,1.25fr)_minmax(0,1fr)]">
+        <InstallStepsCard progress={s.status?.progress ?? null} />
+        <ValveOilCard s={s} view={view} />
+        <div className="grid content-start gap-3.5">
+          <BoardsCard view={view} />
+          <InstallerLogsCard progress={s.status?.progress ?? null} />
+        </div>
+      </div>
     </div>
   )
 }
 
 // The hours offered when a window is first set, before it's saved.
-const SUGGESTED_HOURS: TltgUpdateWindowHours = { start: 2, end: 6 }
+const SUGGESTED_HOURS: VoUpdateWindowHours = { start: 2, end: 6 }
 const HOURS = Array.from({ length: 24 }, (_, hour) => hour)
-const sameHours = (a: TltgUpdateWindowHours | null, b: TltgUpdateWindowHours | null) => (a == null || b == null ? a === b : a.start === b.start && a.end === b.end)
+const sameHours = (a: VoUpdateWindowHours | null, b: VoUpdateWindowHours | null) => (a == null || b == null ? a === b : a.start === b.start && a.end === b.end)
 
 /** The hours automatic updates start in, and the timezone they're read in; edits are kept here until saved. */
-function UpdateWindow({ window, disabled, pending, error }: { window: TltgStatusUpdateWindow; disabled: boolean; pending: boolean; error: string }) {
+function UpdateWindow({ window, disabled, pending, error }: { window: VoStatusUpdateWindow; disabled: boolean; pending: boolean; error: string }) {
   // undefined while not edited; null for any time.
-  const [draft, setDraft] = useState<TltgUpdateWindowHours | null | undefined>(undefined)
-  const [browser] = useState(tltgBrowserTimezone)
+  const [draft, setDraft] = useState<VoUpdateWindowHours | null | undefined>(undefined)
+  const [browser] = useState(voBrowserTimezone)
   const hours = draft === undefined ? window.hours : draft
   const changed = draft !== undefined && !sameHours(draft, window.hours)
-  const valid = hours == null || tltgUpdateWindowValid(hours)
+  const valid = hours == null || voUpdateWindowValid(hours)
   // A window saved without a timezone is saved with this browser's.
   const savesBrowserTimezone = window.timezone == null && browser != null
   const wasPending = useRef(pending)
@@ -273,7 +288,7 @@ function UpdateWindow({ window, disabled, pending, error }: { window: TltgStatus
   })()
   // This browser's timezone, when the window is read in another; not while the hours are being edited.
   const offeredTimezone = browser != null && !changed && browser !== (window.timezone ?? 'UTC') ? browser : null
-  const setHours = (change: Partial<TltgUpdateWindowHours>) => setDraft({ ...(hours ?? SUGGESTED_HOURS), ...change })
+  const setHours = (change: Partial<VoUpdateWindowHours>) => setDraft({ ...(hours ?? SUGGESTED_HOURS), ...change })
   const save = () => {
     if (!changed || !valid) return
     void setUpdateWindow({ window: hours, ...(hours && savesBrowserTimezone && browser ? { timezone: browser } : {}) })
@@ -282,7 +297,7 @@ function UpdateWindow({ window, disabled, pending, error }: { window: TltgStatus
     <select className="field w-auto" aria-label={label} value={value} disabled={disabled} onChange={(e) => onChange(Number(e.target.value))}>
       {HOURS.map((hour) => (
         <option key={hour} value={hour}>
-          {tltgHourLabel(hour)}
+          {voHourLabel(hour)}
         </option>
       ))}
     </select>
@@ -348,7 +363,7 @@ function UpdateWindow({ window, disabled, pending, error }: { window: TltgStatus
   )
 }
 
-function ValveOilCard({ s, view }: { s: ValveOilState; view: TltgStatusView }) {
+function ValveOilCard({ s, view }: { s: ValveOilState; view: VoStatusView }) {
   const [confirm, setConfirm] = useState(false)
   const update = shownUpdate(view, s.dismissed)
   const disabled = updateNowDisabled(s)
@@ -358,8 +373,24 @@ function ValveOilCard({ s, view }: { s: ValveOilState; view: TltgStatusView }) {
   const recoveryRequired = view.updateNow.blockedBy.some((b) => b.code === 'recovery_required')
 
   return (
-    <Card title="Valve Oil" icon={<RefreshCw size={14} />}>
-      <div className="grid">
+    <Card>
+      <div className="flex flex-wrap items-start gap-x-3 gap-y-2">
+        <div className="min-w-0 flex-1">
+          <div className="section-label">Valve Oil{view.printerName ? ` · ${view.printerName}` : ''}</div>
+          <div className="mt-1 flex items-center gap-2.5 text-[22px] font-bold tracking-[-0.01em]">
+            {view.updating ? (
+              <LoaderCircle size={22} className="spin flex-none text-accent-ink" />
+            ) : view.waiting.length > 0 ? (
+              <Download size={22} className="flex-none text-accent-ink" />
+            ) : (
+              <CircleCheck size={22} className="flex-none text-good" />
+            )}
+            {view.updating ? 'Updating' : view.waiting.length > 0 ? 'Waiting to install' : 'Up to date'}
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-3 rounded-xl bg-inset px-3.5 py-1 shadow-[inset_0_0_0_1px_var(--line)]">
         <div className="row-k">
           <span className="k">Valve Oil release</span>
           <span className="v">{view.release || 'Unknown'}</span>
@@ -372,7 +403,7 @@ function ValveOilCard({ s, view }: { s: ValveOilState; view: TltgStatusView }) {
         </div>
       </div>
 
-      <div className="sep my-2" />
+      <div className="mt-2" />
       <label className="flex items-center gap-3 py-1">
         <div className="min-w-0 flex-1">
           <div className="font-medium">Automatic updates</div>
@@ -382,6 +413,8 @@ function ValveOilCard({ s, view }: { s: ValveOilState; view: TltgStatusView }) {
         <Toggle checked={s.autoUpdateRequest ?? s.status?.auto_update.enabled === true} disabled={autoUpdateDisabled(s)} label="Automatic updates" onChange={setAutoUpdate} />
       </label>
       {view.updateWindow && <UpdateWindow window={view.updateWindow} disabled={autoUpdateDisabled(s)} pending={s.windowPending} error={s.windowError} />}
+      {/* QIDI's setting, through Moonraker; it hides itself while Moonraker is down or isn't QIDI's. */}
+      <LanOnly className="mt-2 border-t border-line pt-2" />
 
       <div className="sep my-2" />
       <div className="flex flex-wrap items-start gap-x-3 gap-y-2 py-1">
@@ -399,7 +432,7 @@ function ValveOilCard({ s, view }: { s: ValveOilState; view: TltgStatusView }) {
         </div>
         {view.updateNow.offered && (
           <div className="ml-auto grid max-w-[320px] justify-items-end gap-1">
-            <button className="btn btn-sm btn-primary" disabled={disabled} onClick={() => setConfirm(true)}>
+            <button className="btn btn-primary" disabled={disabled} onClick={() => setConfirm(true)}>
               {s.updateNowPending && <LoaderCircle size={13} className="spin" />}
               {actionLabel}
             </button>
@@ -489,23 +522,7 @@ function ValveOilCard({ s, view }: { s: ValveOilState; view: TltgStatusView }) {
   )
 }
 
-function Notice({ tone, icon, onClose, children }: { tone: 'info' | 'warn' | 'bad' | 'good'; icon?: ReactNode; onClose?: () => void; children: ReactNode }) {
-  const cls = { info: 'tone-accent', warn: 'tone-warn', bad: 'tone-bad', good: 'tone-good' }[tone]
-  const Icon = { info: Info, warn: TriangleAlert, bad: CircleAlert, good: CircleCheck }[tone]
-  return (
-    <div className={`${cls} flex items-start gap-2.5 rounded-lg px-3 py-2`}>
-      <span className="mt-0.5 flex-none">{icon ?? <Icon size={15} />}</span>
-      <div className="min-w-0 flex-1 text-ink [overflow-wrap:anywhere]">{children}</div>
-      {onClose && (
-        <button className="iconbtn -my-1.5 -mr-2 h-7 w-7 flex-none" onClick={onClose} aria-label="Dismiss">
-          <X size={15} />
-        </button>
-      )}
-    </div>
-  )
-}
-
-function UpdateProgress({ update, recoveryRequired }: { update: TltgUpdateView; recoveryRequired: boolean }) {
+function UpdateProgress({ update, recoveryRequired }: { update: VoUpdateView; recoveryRequired: boolean }) {
   // null follows the update: the log opens by itself when it fails.
   const [showLog, setShowLog] = useState<boolean | null>(null)
   useEffect(() => setShowLog(null), [update.id])
@@ -556,29 +573,35 @@ function UpdateProgress({ update, recoveryRequired }: { update: TltgUpdateView; 
   )
 }
 
-function Log({ lines }: { lines: string[] }) {
-  const ref = useRef<HTMLPreElement>(null)
-  const following = useRef(true)
-  // Follow the newest line unless the reader has scrolled back.
-  useLayoutEffect(() => {
-    const el = ref.current
-    if (el && following.current) el.scrollTop = el.scrollHeight
-  }, [lines])
+// The report the installer leaves in Klipper's log folder for a board it can't support yet, as the printer warnings
+// name it (installer/runtime/board_firmware.py).
+const boardReportFile = (id: string) =>
+  id === 'thr' ? 'tltg_thr_firmware.json' : id === 'mcu' ? 'tltg_mainboard_firmware.json' : `tltg_box_firmware_${id}.json`
+
+/** What reporting a board Valve Oil can't support yet takes: the prefilled issue, what the form still asks, and the report. */
+function BoardSupport({ board, url }: { board: VoBoardView; url: string }) {
+  const report = boardReportFile(board.id)
   return (
-    <pre
-      ref={ref}
-      onScroll={(e) => {
-        const el = e.currentTarget
-        following.current = el.scrollTop + el.clientHeight >= el.scrollHeight - 8
-      }}
-      className="m-0 max-h-[240px] overflow-auto rounded-lg bg-inset p-2.5 font-mono text-[12px] whitespace-pre-wrap text-ink-2 shadow-[inset_0_0_0_1px_var(--line)] [overflow-wrap:anywhere]"
-    >
-      {lines.join('\n')}
-    </pre>
+    <div className="tone-warn mt-2 grid gap-1.5 rounded-xl px-3 py-2.5">
+      <b className="text-ink">Open a support issue for {board.name}</b>
+      <ol className="list-decimal grid gap-0.5 pl-5 text-ink-2">
+        <li>Open the issue. The form comes with this printer, its QIDI firmware, and {board.name}'s report filled in.</li>
+        <li>Say how {board.name} got its firmware: it came with the printer, you bought it on its own, or QIDI sent it as a replacement.</li>
+        <li>If the form's report says it was too long for the link, download the report and attach it.</li>
+      </ol>
+      <div className="flex flex-wrap gap-2">
+        <a className="btn btn-sm" href={url} target="_blank" rel="noopener noreferrer">
+          Open a support issue <ExternalLink size={13} />
+        </a>
+        <a className="btn btn-sm btn-ghost" href={client.fileUrl('logs', report)} download={report}>
+          <Download size={13} /> Download the report
+        </a>
+      </div>
+    </div>
   )
 }
 
-function BoardsCard({ view }: { view: TltgStatusView }) {
+function BoardsCard({ view }: { view: VoStatusView }) {
   if (view.boards.length === 0) return null
   return (
     <Card title="Boards" icon={<Cpu size={14} />}>
@@ -592,7 +615,7 @@ function BoardsCard({ view }: { view: TltgStatusView }) {
                   <div className="font-medium">{board.name}</div>
                   <div className="text-[12.5px] text-ink-3">{boardFirmwareText(board)}</div>
                 </div>
-                <span className={`${BOARD_TONE[board.badge]} flex-none rounded-md px-2 py-0.5 text-[12px] font-medium`}>{BOARD_BADGE[board.badge]}</span>
+                <span className={`pill ${BOARD_TONE[board.badge]} flex-none py-0.5!`}>{BOARD_BADGE[board.badge]}</span>
               </div>
               {(explanation || board.shownDetail) && (
                 <div className="mt-1.5 text-ink-2">
@@ -600,7 +623,9 @@ function BoardsCard({ view }: { view: TltgStatusView }) {
                   {board.shownDetail && <div className={`[overflow-wrap:anywhere] ${explanation ? 'mt-0.5 text-[12px] text-ink-3' : ''}`}>{board.shownDetail}</div>}
                 </div>
               )}
-              {board.reportUrl && (
+              {board.reportUrl && (board.state === 'unrecognized_bootloader' || board.state === 'unrecognized_firmware') ? (
+                <BoardSupport board={board} url={board.reportUrl} />
+              ) : board.reportUrl && (
                 <a className="btn btn-sm mt-2" href={board.reportUrl} target="_blank" rel="noopener noreferrer">
                   Report this board <ExternalLink size={13} />
                 </a>

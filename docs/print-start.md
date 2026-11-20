@@ -27,13 +27,13 @@ Without any input shaping, moves at full speed and acceleration shake the toolhe
 By default, each print start measures a fresh adaptive mesh over the area being printed. To load a saved Klipper bed-mesh profile instead, save its exact name:
 
 ```gcode
-SAVE_VARIABLE VARIABLE=tltg_start_bed_mesh_profile VALUE='"default"'
+SAVE_VARIABLE VARIABLE=vo_start_bed_mesh_profile VALUE='"default"'
 ```
 
 To go back to a fresh mesh each print:
 
 ```gcode
-SAVE_VARIABLE VARIABLE=tltg_start_bed_mesh_profile VALUE='""'
+SAVE_VARIABLE VARIABLE=vo_start_bed_mesh_profile VALUE='""'
 ```
 
 This works with files you've already sliced. The console says which one the start is using. The profile must exist, or Klipper stops the print start.
@@ -45,6 +45,10 @@ Needs OrcaSlicer 2.4.2 or later with this project's start G-code.
 Set the filament profile's chamber **Target** and **Minimal** temperatures. With Target `60°C` and Minimal `50°C`, leveling and printing begin once the chamber reaches `50°C`, while heating continues toward `60°C`. The first tool's filament sets the minimum, and a minimum above the target is capped at the target.
 
 A Minimal of `0`, QIDI Studio, and older start G-code all keep the usual wait for 3 °C below the target.
+
+## Exhaust fan at print start and end
+
+With no chamber target, print start turns the exhaust fan on at full speed after the purge or nozzle cleaning. With this project's OrcaSlicer start G-code, it turns off again before the print begins. During the print it runs only when a filament in the print has **Activate air filtration** and **During print** on, at the highest of those filaments' **During print** speeds. After the print, it runs at the **On completion** speed only when the last filament has **Activate air filtration** and **On completion** both on. QIDI Studio sets the exhaust fan for the print itself, and its end G-code doesn't run the exhaust after the print.
 
 ## Exhaust fan while heating the chamber
 
@@ -63,14 +67,14 @@ The fan is turned off when a chamber that had reached its target falls back to 4
 Off by default. Heats the bed, then the chamber, then the nozzle, with a pause between stages:
 
 ```gcode
-SAVE_VARIABLE VARIABLE=tltg_staggered_start_heating VALUE=1
-SAVE_VARIABLE VARIABLE=tltg_staggered_start_heating_dwell_seconds VALUE=10
+SAVE_VARIABLE VARIABLE=vo_staggered_start_heating VALUE=1
+SAVE_VARIABLE VARIABLE=vo_staggered_start_heating_dwell_seconds VALUE=10
 ```
 
 The pause is in seconds; `0` keeps the order without pausing. With a [minimum chamber temperature](#minimum-chamber-temperature), the nozzle starts heating once the chamber reaches the minimum. Turn it off with:
 
 ```gcode
-SAVE_VARIABLE VARIABLE=tltg_staggered_start_heating VALUE=0
+SAVE_VARIABLE VARIABLE=vo_staggered_start_heating VALUE=0
 ```
 
 Needs files sliced with the current start G-code from this repo or the OrcaCloud bundle.
@@ -82,13 +86,13 @@ After a completed print, the Box filament stays loaded. The installer turns this
 To cut and unload after each print the way QIDI does:
 
 ```gcode
-SAVE_VARIABLE VARIABLE=tltg_keep_loaded_between_prints VALUE=0
+SAVE_VARIABLE VARIABLE=vo_keep_loaded_between_prints VALUE=0
 ```
 
 To keep filament loaded again:
 
 ```gcode
-SAVE_VARIABLE VARIABLE=tltg_keep_loaded_between_prints VALUE=1
+SAVE_VARIABLE VARIABLE=vo_keep_loaded_between_prints VALUE=1
 ```
 
 This works with files you've already sliced and survives Klipper restarts.
@@ -100,7 +104,7 @@ A print left paused for 72 hours is cancelled, as Fluidd's **Cancel** does, and 
 To change how long, in hours:
 
 ```gcode
-SAVE_VARIABLE VARIABLE=tltg_pause_timeout_hours VALUE=24
+SAVE_VARIABLE VARIABLE=vo_pause_timeout_hours VALUE=24
 ```
 
 It applies from the next pause.

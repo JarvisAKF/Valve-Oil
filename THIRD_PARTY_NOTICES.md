@@ -16,7 +16,7 @@ The full GPLv3 text is available in [`LICENSE`](LICENSE) and [`LICENSES/GPL-3.0-
   - `installer/klipper/qidi/homing.py`
   - `installer/klipper/qidi/homing-sync-reset.py`
   - `installer/tests/fixtures/source-patches/01.01.06.04/homing-sync-reset.py`
-  - `installer/klipper/tltg/resonance_sweep.py` (adapted portions)
+  - `installer/klipper/extras/resonance_sweep.py` (adapted portions)
   - `installer/system/klipper_chelper/*.so`
   - `chelper/*.patch`
 
@@ -130,7 +130,7 @@ Vendored dependency versions and artifact hashes are recorded in `installer/runt
 Release bundles carry unmodified copies of the add-on files pinned under `addons:` in [`installer/package.yaml`](installer/package.yaml). The bundle builder downloads them; they are not part of this repository.
 
 - OctoEverywhere: the release source archive from <https://github.com/QuinnDamerell/OctoPrint-OctoEverywhere>, licensed under the GNU Affero General Public License version 3. The archive includes its `LICENSE`.
-- Obico (moonraker-obico): the release source archive from <https://github.com/TheSpaghettiDetective/moonraker-obico>, licensed under the GNU Affero General Public License version 3. The archive includes its `LICENSE` and the prebuilt Janus WebRTC server it ships. On the printer, Valve Oil adds its own launcher, `installer/system/tltg_obico.py`, beside the unmodified source.
+- Obico (moonraker-obico): the release source archive from <https://github.com/TheSpaghettiDetective/moonraker-obico>, licensed under the GNU Affero General Public License version 3. The archive includes its `LICENSE` and the prebuilt Janus WebRTC server it ships. On the printer, Valve Oil adds its own launcher, `installer/system/vo_obico.py`, beside the unmodified source.
 - Python source archives from PyPI, which the printer builds into packages: each carries its own license.
 - Python wheels from PyPI, including pip: each wheel carries its own license in its `.dist-info` directory.
 
@@ -152,9 +152,9 @@ ZeroTier is not carried in release bundles either. When the operator installs th
 
 `ui/` is repository-authored and covered by the repository license, except as follows.
 
-- `ui/src/qidi/` ports QIDI Box and printer-warning logic from this project's Fluidd fork, <https://github.com/thelegendtubaguy/fluidd> (GPL-3.0-only), as credited in each file's header.
-- `ui/src/styles.css` adapts the design tokens of Beautiful UI, <https://github.com/slev12397/beautiful-ui>, Copyright (c) 2026 Shane Levine, under the MIT License. The full text is in [`LICENSES/Beautiful-UI-MIT.txt`](LICENSES/Beautiful-UI-MIT.txt).
-- The build bundles npm packages, chiefly React and React DOM (MIT) and lucide-react (ISC). Their versions are pinned in `ui/package-lock.json`, and each build writes their license texts to `licenses.md`, which the installer ships with the build.
+- `ui/src/qidi/` and `ui/src/workers/` port logic from this project's Fluidd fork, <https://github.com/thelegendtubaguy/fluidd> (GPL-3.0-only), as credited in each file's header: the QIDI Box, printer warnings, Valve Oil status and add-ons, bed soak, and the G-code preview parser.
+- `ui/src/styles.css` keeps component styles adapted from Beautiful UI, <https://github.com/slev12397/beautiful-ui>, Copyright (c) 2026 Shane Levine, under the MIT License, with Valve Oil's own colors. The full text is in [`LICENSES/Beautiful-UI-MIT.txt`](LICENSES/Beautiful-UI-MIT.txt).
+- The build bundles npm packages, chiefly React and React DOM (MIT), lucide-react (ISC), CodeMirror (MIT), and the Montserrat typeface from `@fontsource-variable/montserrat` (SIL Open Font License 1.1). Their versions are pinned in `ui/package-lock.json`, and each build writes their license texts to `licenses.md`, which the installer ships with the build.
 
 ## OpenSpec-generated workflow files
 

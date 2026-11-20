@@ -2,15 +2,26 @@
 
 [← Back to the README](../README.md)
 
+## The printer stops at the boot logo
+
+If the touchscreen stays on the boot logo and the printer never joins the network, over Wi-Fi or Ethernet, see [Recovering a printer that won't boot](recovering-an-unbootable-printer.md). It gets the printer booting again over USB without wiping it, and saves its logs on the way. The cause found so far is QIDI's touchscreen **Format External Storage** button, which can replace the system's `/sbin` link on printers that came without the FAT formatting tools.
+
 ## The installer stopped
 
 Read the installer's output first. It stops before writing anything when firmware detection, preflight, printer state, or free-space checks fail, and says why. Each run also saves a log in `~/printer_data/logs`, such as `valve-oil-install-20261117-091402.log`, which the installer names when it stops; attach it when you [report a problem](#reporting-a-problem). See [Logs](install.md#logs).
 
 **`[Errno 13] Permission denied: '/home/qidi/printer_data/.tltg_optimized_installer.lock'`** or **`Could not validate previous package version.`** after an earlier run with `sudo`: versions before 26.11.02.1 ran as root when started with `sudo` and left the files they created owned by root, which a later run as `qidi` couldn't open. Install the current version, with or without `sudo`; it gives those files back to `qidi` before it starts.
 
-**Klipper is stopped with an error,** such as `... is not a valid config section`: you can still update with the installer. It can't read or flash the boards without Klipper, so after waiting for Klipper it leaves the board firmware as it is, installs its files, restarts Klipper, and then updates saved settings. If Klipper still doesn't start, the installer says so; fix the error shown in Fluidd and run the installer again. A new install needs Klipper ready to read the boards first, and otherwise stops with `Valve Oil reads the THR, mainboard, and USB Boxes before a new install and could not read them all, so nothing was installed.`
+**Klipper is stopped with an error,** such as `... is not a valid config section`:
+
+- **A new install** refuses to start and changes nothing, with `Klipper isn't ready (error: ...), so nothing was installed.` and Klipper's own first line of the error. Valve Oil isn't installed yet, so the error comes from the printer as it is. Fix it first, using the error Fluidd or the touchscreen shows, then run the installer again. It also refuses while Klipper is shut down, or still starting after a minute.
+- **An update over an installed Valve Oil** may be what fixes the error, since Valve Oil's own files can cause one. The installer installs its Klipper files and restarts Klipper before it changes anything else. It can't read or flash the boards without Klipper, so it leaves the board firmware as it is. If Klipper starts, the install carries on as usual. If it doesn't, the installer puts its files back, changes nothing else, doesn't restart the printer, and stops with `Klipper still did not start with Valve Oil's files, so they were put back and nothing else was changed.` Fix the error shown in Fluidd and run the installer again.
+
+Automatic updates and **Update now** don't install anything while Klipper isn't ready. The printer warning and Valve Oil UI's **Updates** screen say `Klipper isn't ready; fix the error Fluidd shows, or run the Valve Oil installer`.
 
 **A new install was refused because of a board,** with `This release of Valve Oil doesn't support a board on this printer yet, so nothing was installed.`: open the prefilled support issue link the installer printed above that line, and submit it. See [Boards Valve Oil doesn't support yet](install.md#boards-valve-oil-doesnt-support-yet). If it says a Box `is listed in box.cfg but is not connected`, connect that Box, or remove it in the touchscreen's Box setup, and run the installer again.
+
+**The install or uninstall was cut off,** by a power cut, the printer restarting, or the SSH session closing: run the same command again. It finishes what the stopped run started, from wherever it stopped. An uninstall after a new install was cut off says `An earlier install stopped before it finished`: run the installer again first, then uninstall. Closing the SSH session no longer stops a run; it carries on to the end and writes only its log. If the earlier run left system changes it couldn't roll back, the next run says so, leaves them as they are, keeps the record as `~/printer_data/.tltg_optimized_system_journal.json.set-aside-<time>`, and goes on; attach that file when you [report a problem](#reporting-a-problem).
 
 **`A QIDI firmware update is in progress or did not finish; run ./install.sh to follow or finish it before anything else`:** run `~/valve-oil/install.sh`. See [A QIDI firmware update stopped part way](#a-qidi-firmware-update-stopped-part-way).
 
@@ -22,7 +33,9 @@ Read the installer's output first. It stops before writing anything when firmwar
 
 **The touchscreen says QIDI's update files are missing:** QIDI's Offline Update empties `/home/qidi/update` before it runs any package, and the drive had no copy of QIDI's files for this printer's firmware, so they couldn't be put back. Nothing else was changed. Download the QIDI firmware for your printer and version from QIDI and extract its files into `/home/qidi/update`, or run the Offline Update with QIDI's own package.
 
-**Install stopped:** the screen names the step that didn't finish and why, and says what state the printer was left in. The log is on the drive as `valve-oil-install.log`. **Try again** runs the install again; **Quit** gives the touchscreen back to QIDI's app.
+**Install stopped:** the screen names the step that didn't finish and why, and says what state the printer was left in: nothing changed, everything put back, or Valve Oil installed with that step left to run again. The log is on the drive as `valve-oil-install.log`. **Try again** runs the install again; **Quit** gives the touchscreen back to QIDI's app.
+
+**The printer wasn't restarted:** after the install, the printer would have stopped at its boot logo if it had restarted, and the screen says what it found. Don't turn the printer off. Run `~/valve-oil/install.sh` over SSH, which repairs it, then tap **Try again**, or see [Recovering a printer that won't boot](recovering-an-unbootable-printer.md).
 
 ## QIDI firmware updates
 
@@ -141,10 +154,10 @@ To remove everything instead, see [Uninstall](install.md#uninstall).
 When a Box drops off its USB link with `Lost communication with MCU 'mcu_boxN'`, nothing records why by default. The Box link monitor does. It's **off by default**; turn it on from Fluidd's console:
 
 ```gcode
-SAVE_VARIABLE VARIABLE=tltg_box_link_monitor VALUE=1
+SAVE_VARIABLE VARIABLE=vo_box_link_monitor VALUE=1
 ```
 
-It writes `printer_data/logs/tltg_box_link.log`, separate from `klippy.log` so it survives log rotation. The log is capped at 2 MB and rotates once to `tltg_box_link.log.1`. Set the variable back to `0` to stop recording; this takes effect without a restart.
+It writes `printer_data/logs/vo_box_link.log`, separate from `klippy.log` so it survives log rotation. The log is capped at 2 MB and rotates once to `vo_box_link.log.1`. Before 26.11.18.2 it was `tltg_box_link.log`. Set the variable back to `0` to stop recording; this takes effect without a restart.
 
 **When reporting a Box disconnect,** attach this file along with the end of `klippy.log`.
 
@@ -169,7 +182,7 @@ It writes `printer_data/logs/tltg_box_link.log`, separate from `klippy.log` so i
 
 Open a [GitHub issue](https://github.com/thelegendtubaguy/valve-oil/issues/new/choose) and pick the form that fits. Each form asks for the printer details below, and for the logs that show what happened.
 
-The quickest way is **Open an issue** under **Report a problem**, in the **Valve Oil** section of Fluidd's Settings or on Valve Oil UI's [Updates](valve-oil-ui.md#updates) screen. It opens the bug report form with the printer, its details, and how Valve Oil was installed already filled in, and downloads a support bundle, `valve-oil-support-<printer>-<time>.zip`, to drag into the form. The bundle holds `klippy.log` and `moonraker.log` with the last rotated copy of each, `tltg_box_link.log`, the output of the last **Update now**, add-on change, and QIDI firmware update, Valve Oil's update status, and the printer details. Each log is cut to its newest 16 MB. Logs can show the printer's network addresses, so look through the bundle before you attach it. It doesn't include what the installer printed when you ran it over SSH, so paste that in yourself.
+The quickest way is **Open an issue** under **Report a problem**, in the **Valve Oil** section of Fluidd's Settings or on Valve Oil UI's [Updates](valve-oil-ui.md#updates) screen. It opens the bug report form with the printer, its details, and how Valve Oil was installed already filled in, and downloads a support bundle, `valve-oil-support-<printer>-<time>.zip`, to drag into the form. The bundle holds `klippy.log` and `moonraker.log` with the last rotated copy of each, `vo_box_link.log`, the output of the last **Update now**, add-on change, and QIDI firmware update, Valve Oil's update status, and the printer details. Each log is cut to its newest 16 MB. Logs can show the printer's network addresses, so look through the bundle before you attach it. It doesn't include what the installer printed when you ran it over SSH, so paste that in yourself.
 
 For a board Valve Oil doesn't support yet, use the link in the installer's output or in the board's printer warning instead: it opens the support form with the printer details and the board's report already filled in.
 

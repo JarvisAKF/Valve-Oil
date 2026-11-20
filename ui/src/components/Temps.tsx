@@ -3,6 +3,8 @@ import { Dialog, Sparkline } from './ui'
 import { attempt, toast } from './toast'
 import { runGcode, usePrinter } from '../state/printer'
 import { prettyName } from '../lib/format'
+import { targetError, targetRange } from './control/heaters'
+import { gcode } from './control/gcode'
 
 // m106 is the fan's M106 P index on QIDI printers, so speed changes go through the printer's own fan macro.
 export type Tile = { obj: string; label: string; kind: 'heater' | 'sensor' | 'fan'; m106?: number }
@@ -93,9 +95,9 @@ export function TargetDialog({ tile, onClose }: { tile: Tile; onClose: () => voi
     const name = tile.obj.replace(/^fan_generic /, '')
     const command = (pct: number) => {
       const s255 = Math.round((pct / 100) * 255)
-      if (tile.m106 != null) return `M106 P${tile.m106} S${s255}`
+      if (tile.m106 != null) return gcode`M106 P${tile.m106} S${s255}`
       if (generic) return `SET_FAN_SPEED FAN=${name} SPEED=${(pct / 100).toFixed(2)}`
-      return pct === 0 ? 'M107' : `M106 S${s255}`
+      return pct === 0 ? 'M107' : gcode`M106 S${s255}`
     }
     const set = (pct: number) => attempt(() => runGcode(command(pct))).then(onClose)
     return (
@@ -111,10 +113,12 @@ export function TargetDialog({ tile, onClose }: { tile: Tile; onClose: () => voi
       </Dialog>
     )
   }
-  const max = cfg?.target_max_temp ?? cfg?.max_temp ?? 300
+  // Within max_temp and QIDI's target_max_temp, whichever is lower: QIDI reports 999 for the nozzle and bed.
+  const range = targetRange(cfg)
+  const max = range.max
   const heater = tile.obj.replace(/^heater_generic /, '')
-  const presets = (PRESETS[tile.obj] ?? [45, 55, 65]).filter((t) => t <= max)
-  const set = (t: number) => attempt(() => runGcode(`SET_HEATER_TEMPERATURE HEATER=${heater} TARGET=${t}`)).then(onClose)
+  const presets = (PRESETS[tile.obj] ?? [45, 55, 65]).filter((t) => t <= max && t >= range.min)
+  const set = (t: number) => attempt(() => runGcode(gcode`SET_HEATER_TEMPERATURE HEATER=${heater} TARGET=${t}`)).then(onClose)
   return (
     <Dialog open onClose={onClose} title={`${tile.label} target`}>
       <div className="mb-3 text-ink-2">
@@ -134,9 +138,10 @@ export function TargetDialog({ tile, onClose }: { tile: Tile; onClose: () => voi
         className="mt-3 flex gap-2"
         onSubmit={(e) => {
           e.preventDefault()
-          const t = Number(value)
-          if (!Number.isFinite(t) || t < 0 || t > max) return toast(`Enter 0–${max} °C.`, 'error')
-          set(Math.round(t))
+          const t = Math.round(Number(value))
+          const err = targetError(t, range)
+          if (err) return toast(err, 'error')
+          set(t)
         }}
       >
         <input className="field w-28" inputMode="numeric" placeholder="°C" value={value} onChange={(e) => setValue(e.target.value)} autoFocus />

@@ -132,6 +132,7 @@ A firmware update, an install, and an automatic update SHALL bring the THR and e
 #### Scenario: Closed-loop motor drivers
 - **WHEN** a Max 4 firmware update's target package carries another closed-loop driver version than the installed firmware's, and both drivers report the installed firmware's driver version (or already the target), the expected hardware, and idle
 - **THEN** before QIDI's package is installed, with the touchscreen and Moonraker stopped and the motors off, the run sends each driver not on the target QIDI's image, checked against its pinned size and SHA-256, through QIDI's `UPGRADE_MOTOR`, X then Y
+- **AND** the command turning the motors off waits up to 10 minutes for Klipper's start-up commands, such as QIDI's Box check, to release the G-code queue
 - **AND** a driver counts as updated only once it reports the target version and idle
 
 #### Scenario: Closed-loop drivers not as expected
@@ -184,12 +185,13 @@ The update check SHALL notice a configured USB Box that is not on its pinned fir
 
 #### Scenario: Box with firmware the release does not recognize
 - **WHEN** a USB Box has an admitted bootloader and firmware the release does not recognize
-- **THEN** the Box is left unchanged with a printer warning, and a release that recognizes it flashes it
+- **THEN** the Box is left unchanged with a printer warning that gives the filled-in issue link, and a release that recognizes it flashes it
+- **AND** when the Box reports a version other than the one the target firmware carries, the warning says to update that Box from the touchscreen's firmware page
 
 #### Scenario: Box with a bootloader the release does not admit
 - **WHEN** a USB Box has a bootloader the release does not admit
 - **THEN** the Box is left unchanged, a printer warning says what to do and gives the filled-in issue link, and firmware delivery continues for the rest of the printer
-- **AND** when a delivered firmware changes the Box version, the warning says to update that Box from the touchscreen's firmware page
+- **AND** when the Box reports a version other than the one the target firmware carries, the warning says to update that Box from the touchscreen's firmware page
 - **AND** update checks don't read that Box again until it reports another version or a release admits what was found
 
 #### Scenario: Box restored to QIDI's firmware

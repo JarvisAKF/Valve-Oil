@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
 import sys
+import threading
 import traceback
-from contextlib import nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext, suppress
 from dataclasses import replace
 from pathlib import Path
 
-from . import addons_cli, firmware_update, install_flow, install_screen, messages, progress, safety, update_window, valve_oil_status
+from . import addons_cli, boot_path, firmware_update, install_flow, install_screen, messages, progress, safety, update_window, valve_oil_status
 from .auto_update import (
     KIND_ENV,
     LOCK_HELD_ENV,
@@ -25,13 +27,15 @@ from .box_enablement import maybe_reconcile_tool_slots_after_box_count_change
 from .backup import BackupArchiveError
 from .compatibility import CompatibilityValidationError, load_supported_upgrade_sources, validate_manifest_compatibility
 from .demo import resolve_demo_tui_delay_seconds, run_demo
-from .errors import ActivePrintError, InstallerError, OperationCancelled, PrinterStateError, RecoveryRequiredError
+from .errors import (ActivePrintError, InstallerError, KlipperNotReadyError, LockAcquisitionError, OperationCancelled,
+                     PrinterStateError, RecoveryRequiredError)
 from .host_reboot import (
     HostRebootError,
     maybe_schedule_recommended_reboot,
     maybe_schedule_host_reboot,
     perform_scheduled_host_reboot,
     read_host_reboot_marker,
+    reboot_pending,
     verify_completed_host_reboot,
 )
 from .locking import acquire
@@ -42,7 +46,7 @@ from .reporter import create_reporter
 from .run_log import LoggingReporter, open_run_log
 from .restore_helper import RestoreHelperError, run_restore_helper
 from .rollback import clear_recovery_sentinel
-from .runner import block_qidi_package_updates, run_install
+from .runner import block_qidi_package_updates, ensure_klipper_ready_for_new_install, run_install
 from .safety import ensure_no_recovery_sentinel
 from .state_file import StateValidationError
 from .system_optimizations import (
@@ -51,7 +55,7 @@ from .system_optimizations import (
     verify_rockchip_postflight,
 )
 from .uninstall import run_uninstall
-from .board_firmware import board_preflight, deliver_board_firmware, load_board_admission
+from .board_firmware import board_preflight, deliver_board_firmware, existing_installation, load_board_admission
 from .box_firmware import run_box_firmware
 from .mainboard_firmware import run_mainboard_firmware
 
@@ -120,11 +124,41 @@ def main(
         reporter.debug(event="cli.log", path=run_log.path,
                        argv=" ".join(argv if argv is not None else sys.argv[1:]))
     try:
-        return _dispatch(args, env=env, bundle_root=bundle_root, reporter=reporter, paths=paths,
-                         input_stream=input_stream)
+        with _survives_hangup():
+            return _dispatch(args, env=env, bundle_root=bundle_root, reporter=reporter, paths=paths,
+                             input_stream=input_stream)
     finally:
         if run_log is not None:
             run_log.close()
+
+
+@contextmanager
+def _survives_hangup():
+    """Keep a run going when the SSH session closing hangs up its terminal.
+
+    The default SIGHUP stops the process at once, with no rollback and no record of where it was, which can leave the
+    printer half changed. The run instead goes on to its end and writes only its log: the terminal output is pointed at
+    /dev/null, so writing to a terminal that is gone can't fail it either. Questions are all asked first, so nothing
+    waits for an answer that can't come; one that does reads end of input."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def hung_up(signum, frame):
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        try:
+            for descriptor in (1, 2):
+                with suppress(OSError):
+                    os.dup2(devnull, descriptor)
+        finally:
+            os.close(devnull)
+        signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+
+    previous = signal.signal(signal.SIGHUP, hung_up)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGHUP, previous)
 
 
 def _dispatch(args, *, env, bundle_root, reporter, paths, input_stream, front_end=None) -> int:
@@ -239,6 +273,7 @@ def _dispatch(args, *, env, bundle_root, reporter, paths, input_stream, front_en
                         reporter=reporter,
                         environ=env,
                         require_klipper_idle=args.require_klipper_idle,
+                        require_ready=not args.operator_approved,
                     )
                 elif read_host_reboot_marker(paths) is None:
                     perform_scheduled_host_reboot(
@@ -247,11 +282,20 @@ def _dispatch(args, *, env, bundle_root, reporter, paths, input_stream, front_en
                         environ=env,
                         recommended=True,
                         require_klipper_idle=args.require_klipper_idle,
+                        require_ready=not args.operator_approved,
                     )
             return 0
 
         if args.mode == "auto-update-check":
-            with acquire(paths.lock_path):
+            with ExitStack() as held:
+                try:
+                    held.enter_context(acquire(paths.lock_path))
+                except LockAcquisitionError:
+                    # An install, uninstall, or update is running; the next hourly check sees what it leaves. A
+                    # failed run here would only mark the service failed.
+                    reporter.line(messages.AUTO_UPDATE_SKIPPED_ANOTHER_RUN)
+                    reporter.debug(event="cli.complete", mode=args.mode, return_code=0, action="skipped-locked")
+                    return 0
                 reporter.debug(
                     event="cli.lock.acquired",
                     mode=args.mode,
@@ -326,8 +370,11 @@ def _dispatch(args, *, env, bundle_root, reporter, paths, input_stream, front_en
                 if result.action in ("already-current", "boards-updated", "boards-not-updated"):
                     try:
                         safety.ensure_printer_idle(paths.moonraker_url)
+                        safety.ensure_klipper_ready(paths.moonraker_url)
                     except ActivePrintError:
                         reporter.line(messages.AUTO_UPDATE_SKIPPED_ACTIVE_PRINT)
+                    except KlipperNotReadyError:
+                        reporter.line(messages.AUTO_UPDATE_SKIPPED_KLIPPER_NOT_READY)
                     except PrinterStateError:
                         reporter.line(messages.AUTO_UPDATE_SKIPPED_UNKNOWN_STATE)
                     else:
@@ -494,6 +541,8 @@ def _dispatch(args, *, env, bundle_root, reporter, paths, input_stream, front_en
             pass  # the firmware update schedules the reboot its install needs when it ends
         elif front_end is not None:
             pass  # the USB installer restarts the printer when its drive comes out (usb_install.py)
+        elif not lock_inherited and args.mode == "install" and _reboot_held_for_unfinished_install(paths, reporter):
+            pass  # the reboot stays pending for a run that finishes
         elif (
             not lock_inherited
             and read_host_reboot_marker(paths) is not None
@@ -591,17 +640,27 @@ def _install(args, *, paths, manifest, reporter, env, input_stream, in_firmware_
     install is done; a firmware update started here takes it over (install_screen.py). A front end that holds the
     screen itself (usb_install.py) has it from its first screen."""
     firmware = None
+    if not args.dry_run:
+        # First of all: a printer QIDI's app left unable to start can also leave Klipper in error (boot_path.py).
+        boot_path.protect(paths, reporter=reporter, environ=env, dry_run=False, input_stream=input_stream)
+    if not in_firmware_update and not existing_installation(paths, manifest):
+        # Before the touchscreen is taken or a board is read: a new install needs a printer that works as it is.
+        ensure_klipper_ready_for_new_install(paths)
     if front_end is not None:
         screen = nullcontext(front_end.hold)
     elif args.dry_run:
         screen = nullcontext()
     else:
         screen = install_screen.held(paths=paths, reporter=reporter, environ=env, input_stream=input_stream)
+    # Valve Oil UI follows the install's steps from the status service, however it was started.
+    published = nullcontext() if args.dry_run else valve_oil_status.progress_published(paths, log=_log_name(reporter))
     try:
-        with screen as hold:
+        with published as publisher, screen as hold:
             firmware = _install_held(args, hold, paths=paths, manifest=manifest, reporter=reporter, env=env,
                                      input_stream=input_stream, in_firmware_update=in_firmware_update,
                                      front_end=front_end)
+            if publisher is not None and firmware is not None and firmware.handled:
+                publisher.outcome = valve_oil_status.HANDED_OFF
     finally:
         progress.end()
     if not args.dry_run and (firmware is None or not firmware.handled):
@@ -613,6 +672,8 @@ def _install_held(args, hold, *, paths, manifest, reporter, env, input_stream, i
     firmware = None
     # Every board is read before anything changes; a new install with a board this release doesn't admit stops
     # here.
+    if front_end is not None and not args.dry_run:
+        front_end.reading_boards()
     printer, admission = board_preflight(
         paths=paths, reporter=reporter, manifest=manifest, dry_run=args.dry_run,
         input_stream=input_stream, environ=env,
@@ -705,10 +766,25 @@ def _progress_origin(env) -> str:
     return env.get(USB_ORIGIN_ENV) and progress.ORIGIN_USB or progress.ORIGIN_SSH
 
 
+def _log_name(reporter) -> str | None:
+    path = getattr(getattr(reporter, "log", None), "path", None)
+    return path.name if path is not None else None
+
+
 def _name_log(reporter) -> None:
     path = getattr(getattr(reporter, "log", None), "path", None)
     if path is not None:
         reporter.line(f"The log of this run is {path}; download it from Fluidd's Logs to report this.")
+
+
+def _reboot_held_for_unfinished_install(paths, reporter) -> bool:
+    """Whether a reboot this install would schedule is held because the install didn't finish: Klipper still has to
+    restart onto the installed files. A Klipper that isn't ready holds every reboot (host_reboot._printer_allows_reboot).
+    Holding leaves the reboot pending, so the next install that finishes schedules it."""
+    if not reboot_pending(paths) or not paths.restart_marker_path.exists():
+        return False
+    reporter.line(messages.HOST_REBOOT_HELD_UNFINISHED.format(reason=messages.HOST_REBOOT_HELD_RESTART_PENDING))
+    return True
 
 
 def _verify_completed_host_reboot(
@@ -814,6 +890,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--keep-system-optimizations", action="store_true", help="During uninstall, keep the DNS, APT, qidiclient GIF, Rockchip root-mount, VPN, Bluetooth, and AI service changes.")
     parser.add_argument("--reboot-host", action="store_true", help="Authorize a pending managed host OS reboot after successful uninstall; install reboots without it.")
     parser.add_argument("--require-klipper-idle", action="store_true", help=argparse.SUPPRESS)
+    # complete-host-reboot: the operator approved this reboot (uninstall), so it doesn't wait for a ready Klipper.
+    parser.add_argument("--operator-approved", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--uninstall", action="store_true", help="Compatibility alias for the uninstall mode.")
     parser.add_argument("--clear-recovery-sentinel", action="store_true", help="Compatibility alias for the clear-recovery-sentinel mode.")
     auto_update_actions = parser.add_mutually_exclusive_group()
@@ -890,6 +968,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--reboot-host is only supported with install and uninstall.")
     if args.require_klipper_idle and args.mode != "complete-host-reboot":
         parser.error("--require-klipper-idle is only supported with complete-host-reboot.")
+    if args.operator_approved and args.mode != "complete-host-reboot":
+        parser.error("--operator-approved is only supported with complete-host-reboot.")
     return args
 
 def _normalize_command_aliases(argv: list[str] | None) -> list[str] | None:

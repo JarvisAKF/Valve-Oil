@@ -54,7 +54,7 @@ from . import boot_screen
 from . import box_config
 from .auto_update import current_auto_update_checksum
 from .errors import InstallerError
-from .fs_atomic import atomic_delete, atomic_write_text
+from .fs_atomic import atomic_delete, atomic_write_text, fsync_directory
 from .host_reboot import HostRebootError, clear_host_reboot_marker, read_host_reboot_marker, recommend_reboot, write_host_reboot_marker
 from .interaction import confirm_yes, prompt_yes
 from .models import (
@@ -374,6 +374,16 @@ GUARDED_FILE_PATCHES = {
         create_if_missing=True,
         reloads_units=True,
     ),
+    # udev reads a changed rules file by itself; the rule applies the next time wlan0 appears.
+    wifi_wait.RULE_OPERATION: _GuardedFilePatch(
+        label="Wi-Fi start udev rule",
+        file=lambda spec: wifi_wait.RULE_FILE,
+        patch=wifi_wait.patch_rule,
+        restart_service=None,
+        missing_message=None,
+        skip_unrecognized=True,
+        create_if_missing=True,
+    ),
     **{
         operation: _GuardedFilePatch(
             label=f"{service_priority.SERVICES[operation]} priority drop-in",
@@ -684,16 +694,17 @@ def recover_pending_system_optimization(
         environ=environ,
         run=run,
     )
-    before = _journal_path(paths).exists()
     if manifest.system_optimizations is None:
         raise SystemOptimizationRecoveryError("Manifest has no host recovery specification.")
     try:
         if ledger:
             validate_system_ledger(ledger, manifest=manifest, paths=paths)
-    except StateValidationError as exc:
-        raise SystemOptimizationRecoveryError("System optimization recovery state is invalid.", ledger) from exc
+    except StateValidationError:
+        # The journal is recovered from its own records; the ledger only goes with errors, and the install's own
+        # validation of the state reports a bad one.
+        ledger = {}
     restarts = _ServiceRestarts(paths=paths, root=root, sudo_password=sudo_password, run=run, urlopen=urlopen)
-    failure = _recover_pending_host_journal(
+    failure, recovered = _recover_pending_host_journal(
         paths=paths,
         root=root,
         sudo_password=sudo_password,
@@ -701,9 +712,9 @@ def recover_pending_system_optimization(
         ledger=ledger,
         spec=manifest.system_optimizations,
         restarts=restarts,
+        reporter=reporter,
     )
     restarts.flush()
-    recovered = before and not _journal_path(paths).exists()
     if recovered:
         reporter.line(messages.SYSTEM_PENDING_ROLLBACK_FINISHED)
         if failure:
@@ -1690,6 +1701,7 @@ def apply_system_optimizations(
         ledger=ledger,
         spec=spec,
         restarts=restarts,
+        reporter=reporter,
     )
     selected_ids = _selected_operation_ids(spec, policy)
     if "qidiclient_static_gifs" in selected_ids:
@@ -2291,7 +2303,8 @@ def apply_system_optimizations(
                 )
                 continue
             _report_step(reporter, operation_id, spec)
-            if preimage is None and binary_original is not None and _file_matches_preimage(binary_original, root=root):
+            if (preimage is None and binary_original is not None and not _file_backup_lost(binary_original)
+                    and _file_matches_preimage(binary_original, root=root)):
                 # QIDI's executable is on the host: the preserved original also rolls the transaction back.
                 preimage = binary_original
             if preimage is None:
@@ -2791,10 +2804,11 @@ def _capture_gifs_preimage(*, paths: RuntimePaths, spec: SystemOptimizationsSpec
                 }
                 backup = backup_root / relative
                 backup.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source_existing, backup)
+                _copy_backup(source_existing, backup)
                 replaced.append(relative)
             else:
                 created.append(relative)
+    _sync_backup_dirs(backup_root, paths)
     return {
         "backup_dir": str(backup_root),
         "destination": spec.qidiclient_static_gifs.destination,
@@ -2804,6 +2818,23 @@ def _capture_gifs_preimage(*, paths: RuntimePaths, spec: SystemOptimizationsSpec
         "restart_service": spec.qidiclient_static_gifs.restart_service,
     }
 
+
+
+def _copy_backup(source: Path, backup: Path) -> None:
+    """Copy `source` to `backup` and flush it, so a journal written next never names a backup a power cut emptied."""
+    shutil.copy2(source, backup)
+    with backup.open("rb") as handle:
+        os.fsync(handle.fileno())
+
+
+def _sync_backup_dirs(directory: Path, paths: RuntimePaths) -> None:
+    """Flush `directory`'s folders and the folders above it up to printer_data, which the backup may have created."""
+    for current, _, _ in os.walk(directory):
+        fsync_directory(Path(current))
+    for parent in directory.parents:
+        fsync_directory(parent)
+        if parent == paths.printer_data_root:
+            break
 
 
 def _apply_gifs(*, paths: RuntimePaths, spec: SystemOptimizationsSpec, root: Path, sudo_password: str | None, run, preimage: dict[str, Any], restarts: _ServiceRestarts) -> None:
@@ -2890,6 +2921,8 @@ def _restore_guarded_file_preimage(operation_id: str, preimage: dict[str, Any], 
     guarded = GUARDED_FILE_PATCHES[operation_id]
     target = _map_path(root, preimage["path"])
     _reject_symlink_path(target, root=root)
+    if _file_backup_lost(preimage):
+        return
     if guarded.binary is not None:
         if not target.is_file() or not guarded.binary.same_build(_sha256_file(target), preimage["sha256"]):
             raise SystemOptimizationRecoveryError(f"{guarded.label} changed during the transaction; preserving it for recovery.")
@@ -2909,6 +2942,10 @@ def _restore_guarded_file(guarded: _GuardedFilePatch, preimage: dict[str, Any], 
         run_sudo_ignore_failure(["systemctl", "disable", "--now", "--no-reload", guarded.service_unit], run=run, password=sudo_password or "")
         restarts.unit_removed(guarded.service_unit)
     _restore_file_preimage(preimage, paths=paths, root=root, sudo_password=sudo_password, run=run, durable=guarded.binary is not None)
+    unit = PurePosixPath(str(preimage.get("path", "")))
+    if not preimage.get("exists") and unit.parent == PurePosixPath("/etc/systemd/system") and unit.suffix in {".service", ".timer"}:
+        # A removed unit whose last run failed stays listed as failed until the next boot otherwise.
+        run_sudo_ignore_failure(["systemctl", "reset-failed", unit.name], run=run, password=sudo_password or "")
     if guarded.service_unit:
         restarts.reload_units()
     elif guarded.restart_service:
@@ -2923,11 +2960,12 @@ def _file_matches_preimage(preimage: dict[str, Any], *, root: Path) -> bool:
         return not mapped.exists() and not mapped.is_symlink()
     if preimage.get("type") == "symlink":
         return mapped.is_symlink() and os.readlink(mapped) == preimage.get("target")
+    if _file_backup_lost(preimage):
+        return True
     if not mapped.is_file() or mapped.is_symlink():
         return False
     try:
-        backup = Path(str(preimage["backup_path"]))
-        return mapped.stat().st_size == backup.stat().st_size and _sha256_file(mapped) == _sha256_file(backup)
+        return _sha256_file(mapped) == preimage["sha256"]
     except (KeyError, OSError):
         return False
 
@@ -2973,14 +3011,18 @@ def _operation_matches_preimage(
         return all(current.get(key) == preimage.get(key) for key in ("exists", "enabled", "active"))
     if operation_id == "qidiclient_static_gifs":
         destination = _map_path(root, str(preimage.get("destination", "")))
-        backups = Path(str(preimage.get("backup_dir", "")))
+        files = preimage.get("files") if isinstance(preimage.get("files"), dict) else {}
+        lost = set(_lost_gif_backups(preimage))
         try:
             return all(
-                (destination / relative).is_file()
-                and (destination / relative).read_bytes() == (backups / relative).read_bytes()
+                relative in lost
+                or (
+                    (destination / relative).is_file()
+                    and _sha256_file(destination / relative) == str(files.get(relative, {}).get("sha256"))
+                )
                 for relative in preimage.get("replaced", [])
             ) and all(not (destination / relative).exists() for relative in preimage.get("created", []))
-        except OSError:
+        except (OSError, AttributeError):
             return False
     if operation_id == ROCKCHIP_ROOT_SYNC_OPERATION:
         dropin = preimage.get("dropin")
@@ -3010,11 +3052,15 @@ def _restore_file_preimage(preimage: dict[str, Any], *, paths: RuntimePaths, roo
             _reject_parent_symlink_path(mapped, root=root)
             run_sudo_or_raise(["ln", "-sfn", target, path], messages.SYSTEM_RESTORE_FAILED, run=run, password=sudo_password or "")
         return
+    if _file_backup_lost(preimage):
+        return
     backup_path = Path(preimage["backup_path"])
     if _is_fake_root(root):
-        mapped.unlink(missing_ok=True)
+        # Replaced in one rename, as `install` and `mv` do on the printer.
         mapped.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(backup_path, mapped)
+        staged = mapped.with_name(f"{mapped.name}.tltg-restore-{_now_for_path()}.tmp")
+        shutil.copy2(backup_path, staged)
+        os.replace(staged, mapped)
         if durable:
             _sync_host_path(path, root=root, sudo_password=sudo_password, run=run)
     else:
@@ -3056,10 +3102,11 @@ def _restore_gifs(preimage: dict[str, Any], *, root: Path, sudo_password: str | 
     backup_dir = Path(preimage["backup_dir"])
     destination = _map_path(root, preimage["destination"])
     metadata = preimage.get("files", {}) if isinstance(preimage.get("files"), dict) else {}
+    lost = set(_lost_gif_backups(preimage))
     for relative in preimage.get("replaced", []):
         backup = backup_dir / relative
         target = destination / relative
-        if not backup.exists():
+        if relative in lost:
             continue
         file_metadata = metadata.get(relative, {}) if isinstance(metadata.get(relative), dict) else {}
         mode = str(file_metadata.get("mode", "0644"))
@@ -3086,6 +3133,29 @@ def _restore_gifs(preimage: dict[str, Any], *, root: Path, sudo_password: str | 
         restarts.request(str(preimage["restart_service"]))
 
 
+def _lost_gif_backups(preimage: dict[str, Any]) -> list[str]:
+    """Replaced GIFs whose backup is missing or no longer holds QIDI's file, such as after a power cut emptied it.
+    They are left as they are; the install writes its still images over them."""
+    backup_dir = Path(str(preimage.get("backup_dir", "")))
+    files = preimage.get("files") if isinstance(preimage.get("files"), dict) else {}
+    lost = []
+    for relative in preimage.get("replaced", []):
+        backup = backup_dir / relative
+        metadata = files.get(relative)
+        try:
+            intact = (
+                isinstance(metadata, dict)
+                and not backup.is_symlink()
+                and backup.is_file()
+                and _sha256_file(backup) == metadata.get("sha256")
+            )
+        except OSError:
+            intact = False
+        if not intact:
+            lost.append(relative)
+    return lost
+
+
 def _capture_file(path: str, *, paths: RuntimePaths, root: Path) -> dict[str, Any]:
     mapped = _map_path(root, path)
     preimage: dict[str, Any] = {"path": path, "exists": mapped.exists() or mapped.is_symlink()}
@@ -3098,9 +3168,8 @@ def _capture_file(path: str, *, paths: RuntimePaths, root: Path) -> dict[str, An
     backup_root.mkdir(parents=True, exist_ok=True)
     backup_path = backup_root / path.lstrip("/")
     backup_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(mapped, backup_path)
-    with backup_path.open("rb") as handle:
-        os.fsync(handle.fileno())
+    _copy_backup(mapped, backup_path)
+    _sync_backup_dirs(backup_path.parent, paths)
     stat = mapped.stat()
     preimage.update({
         "type": "file",
@@ -3348,6 +3417,10 @@ class _ServiceRestarts:
             # without Moonraker and keeps showing it until the app restarts.
             pending.setdefault(QIDICLIENT_SERVICE, False)
         for service in sorted(pending, key=_restart_rank):
+            # A unit Valve Oil installs that isn't there, such as one a run stopped before writing whose script a
+            # rollback restores, has nothing to restart.
+            if not self._owned_unit_present(service):
+                continue
             # A pending Klipper source activation restarts Klipper after this transaction.
             if service == KLIPPER_SERVICE and self._paths.restart_marker_path.exists():
                 continue
@@ -3359,6 +3432,15 @@ class _ServiceRestarts:
             _restart_service(service, root=self._root, sudo_password=self._sudo_password, run=self._run, required=pending[service])
             if service == MOONRAKER_SERVICE and not self._moonraker_answers() and pending[service]:
                 raise SystemOptimizationError("Moonraker did not answer after its restart.")
+
+    def _owned_unit_present(self, service: str) -> bool:
+        for guarded in GUARDED_FILE_PATCHES.values():
+            if guarded.service_unit == service:
+                try:
+                    return _map_path(self._root, guarded.file(None)).exists()
+                except (AttributeError, TypeError):
+                    return True
+        return True
 
     def _moonraker_answers(self) -> bool:
         deadline = time.monotonic() + MOONRAKER_READY_TIMEOUT_SECONDS
@@ -3856,6 +3938,7 @@ def _selected_operation_ids(spec: SystemOptimizationsSpec, policy: dict[str, Any
         restart_on_exit.KLIPPER_OPERATION,
         webcam_id.OPERATION,
         wifi_wait.OPERATION,
+        wifi_wait.RULE_OPERATION,
         *service_priority.SERVICES,
         *cpu_tuning.FILES,
         # The path files go after the packages they point at, so restoration removes them first.
@@ -3957,7 +4040,7 @@ def _desired(operation_id: str, spec: SystemOptimizationsSpec) -> dict[str, Any]
         moonraker_speedups.PATH_OPERATION,
         moonraker_speedups.KLIPPER_PATH_OPERATION, moonraker_fixes.MODULE_OPERATION, moonraker_fixes.PATH_OPERATION,
         restart_on_exit.MOONRAKER_OPERATION, restart_on_exit.KLIPPER_OPERATION,
-        webcam_id.OPERATION, wifi_wait.OPERATION, *service_priority.SERVICES, *cpu_tuning.FILES, zram_swap.UNIT_OPERATION, cpu_governor.OPERATION,
+        webcam_id.OPERATION, wifi_wait.OPERATION, wifi_wait.RULE_OPERATION, *service_priority.SERVICES, *cpu_tuning.FILES, zram_swap.UNIT_OPERATION, cpu_governor.OPERATION,
         adb_usb_only.OPERATION, remote_screen.UNIT_OPERATION, remote_screen.SERVER_OPERATION, remote_screen.NGINX_OPERATION,
         addons_service.UNIT_OPERATION, addons_service.SERVER_OPERATION,
         status_service.UNIT_OPERATION, status_service.SERVER_OPERATION,
@@ -4126,27 +4209,38 @@ def finalize_legacy_system_ledger_migration(paths: RuntimePaths) -> None:
     journal = paths.printer_data_root / LEGACY_MIGRATION_JOURNAL
     if not journal.exists():
         return
-    target, _ = _load_legacy_migration_journal(paths, journal)
-    atomic_delete(target / LEGACY_MIGRATION_OWNER)
+    try:
+        target, _ = _load_legacy_migration_journal(paths, journal)
+    except StateValidationError:
+        atomic_delete(journal)
+        return
+    # The journal goes first: a power cut between the two leaves only a marker nothing reads.
     atomic_delete(journal)
+    atomic_delete(target / LEGACY_MIGRATION_OWNER)
 
 
 def recover_pending_legacy_system_ledger_migration(paths: RuntimePaths, state_path: Path) -> None:
     journal = paths.printer_data_root / LEGACY_MIGRATION_JOURNAL
     if not journal.exists():
         return
-    target, _ = _load_legacy_migration_journal(paths, journal)
+    try:
+        target, _ = _load_legacy_migration_journal(paths, journal)
+    except StateValidationError:
+        # A cleanup a power cut stopped leaves a journal without its folder or marker. The journal only lets a run
+        # remove a folder the migration made; without it nothing is removed, so dropping it never loses anything.
+        atomic_delete(journal)
+        return
     referenced = False
     if state_path.exists():
         state = load_installed_state(state_path)
         preimages = state.system_ledger.get("restore_preimages", {}) if isinstance(state.system_ledger, dict) else {}
         gif_preimage = preimages.get("qidiclient_static_gifs", {}) if isinstance(preimages, dict) else {}
         referenced = gif_preimage.get("backup_dir") == str(target / "gifs")
+    atomic_delete(journal)
     if referenced:
         atomic_delete(target / LEGACY_MIGRATION_OWNER)
     else:
-        shutil.rmtree(target)
-    atomic_delete(journal)
+        shutil.rmtree(target, ignore_errors=True)
 
 
 def _load_legacy_migration_journal(paths: RuntimePaths, journal: Path) -> tuple[Path, str]:
@@ -4315,9 +4409,10 @@ def _materialize_legacy_gif_preimage(preimage: dict[str, Any], *, paths: Runtime
         for relative in preimage["replaced"]:
             target = new / relative
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(old / relative, target)
+            _copy_backup(old / relative, target)
             if hashlib.sha256(target.read_bytes()).hexdigest() != preimage["files"][relative]["sha256"]:
                 raise StateValidationError("Migrated GIF backup hash does not match.")
+        _sync_backup_dirs(new, paths)
         preimage["backup_dir"] = str(new)
         return created_root
     except BaseException:
@@ -4414,6 +4509,7 @@ def _host_operation_ids(spec: SystemOptimizationsSpec) -> frozenset[str]:
             restart_on_exit.KLIPPER_OPERATION,
             webcam_id.OPERATION,
             wifi_wait.OPERATION,
+            wifi_wait.RULE_OPERATION,
             MOONRAKER_SPEEDUPS_OPERATION,
             moonraker_speedups.PATH_OPERATION,
             moonraker_speedups.KLIPPER_PATH_OPERATION,
@@ -4531,15 +4627,27 @@ def _validate_host_file_preimage(preimage: Any, *, expected_path: str, paths: Ru
 
 
 def _validate_managed_backup(backup: Path, expected_sha256: str, paths: RuntimePaths) -> None:
+    """A backup must sit in the managed backup root under a valid hash. One that is missing or no longer matches,
+    such as one a power cut emptied, isn't an error: it is never restored (_file_backup_lost)."""
     root = (paths.printer_data_root / SYSTEM_BACKUP_DIR).resolve()
     try:
         backup.resolve().relative_to(root)
     except (OSError, ValueError) as exc:
         raise StateValidationError("Host restoration backup escapes the managed backup root.") from exc
-    if backup.is_symlink() or not backup.is_file() or not _is_sha256(expected_sha256):
+    if not _is_sha256(expected_sha256):
         raise StateValidationError("Host restoration backup is invalid.")
-    if _sha256_file(backup) != expected_sha256:
-        raise StateValidationError("Host restoration backup hash does not match.")
+
+
+def _file_backup_lost(preimage: dict[str, Any]) -> bool:
+    """A file preimage whose backup is missing or no longer holds the recorded file. Its file is left as it is: there
+    is nothing trustworthy to put back, and refusing would leave every later run stopped."""
+    if not preimage.get("exists") or preimage.get("type") == "symlink":
+        return False
+    try:
+        backup = Path(str(preimage["backup_path"]))
+        return backup.is_symlink() or not backup.is_file() or _sha256_file(backup) != preimage.get("sha256")
+    except (KeyError, OSError):
+        return True
 
 
 def _validate_file_metadata(preimage: dict[str, Any]) -> None:
@@ -4582,7 +4690,13 @@ def _validate_gif_preimage(preimage: dict[str, Any], *, spec: SystemOptimization
         if not isinstance(metadata, dict) or set(metadata) != {"mode", "uid", "gid", "sha256"}:
             raise StateValidationError("GIF restoration metadata is invalid.")
         _validate_file_metadata({"mode": metadata["mode"], "uid": metadata["uid"], "gid": metadata["gid"]})
-        _validate_managed_backup(backup_dir / relative, str(metadata["sha256"]), paths)
+        if not _is_sha256(str(metadata["sha256"])):
+            raise StateValidationError("GIF restoration metadata is invalid.")
+        try:
+            (backup_dir / relative).resolve().relative_to(root)
+        except (OSError, ValueError) as exc:
+            raise StateValidationError("GIF backup escapes the managed backup root.") from exc
+        # A backup a power cut damaged isn't an error here: it is never restored (_lost_gif_backups).
 
 
 def _ledger_with_policy(ledger: dict[str, Any] | None, policy: dict[str, str]) -> dict[str, Any]:
@@ -4821,26 +4935,57 @@ def _write_host_journal(
 
 
 
-def _recover_pending_host_journal(
-    *, paths: RuntimePaths, root: Path, sudo_password: str | None, run, ledger: dict[str, Any], spec: SystemOptimizationsSpec, restarts: _ServiceRestarts,
-) -> str | None:
-    """Finish a pending transaction; return the failure that left it pending, if recorded."""
-    path = _journal_path(paths)
-    if not path.exists(): return None
-    try: payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc: raise SystemOptimizationRecoveryError("System optimization journal is invalid.") from exc
-    operation_id = payload.get("operation") if isinstance(payload, dict) else None
-    transaction_id = payload.get("transaction_id") if isinstance(payload, dict) else None
-    preimages = payload.get("preimages") if isinstance(payload, dict) else None
+# Runs that may try a pending rollback before its journal is set aside: enough for a service that was briefly
+# unavailable, not so many that a host QIDI's package changed for good stops every run.
+JOURNAL_RECOVERY_ATTEMPTS = 3
+
+
+def _load_pending_host_journal(path: Path, *, spec: SystemOptimizationsSpec, paths: RuntimePaths) -> tuple[dict[str, Any], dict[str, Any]]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise SystemOptimizationRecoveryError("System optimization journal is invalid.") from exc
+    if not isinstance(payload, dict):
+        raise SystemOptimizationRecoveryError("System optimization journal is invalid.")
+    operation_id = payload.get("operation")
+    transaction_id = payload.get("transaction_id")
+    preimages = payload.get("preimages")
     if payload.get("schema_version") == 1:
         preimage = payload.get("preimage")
         preimages = {operation_id: preimage} if isinstance(operation_id, str) and isinstance(preimage, dict) else None
     if (operation_id not in _host_operation_ids(spec) or not isinstance(transaction_id, str) or not transaction_id or payload.get("phase") not in {"apply", "restore", "compensating", "captured"} or not isinstance(preimages, dict) or not preimages or any(key not in _host_operation_ids(spec) or not isinstance(value, dict) for key, value in preimages.items())):
-        raise SystemOptimizationRecoveryError("System optimization journal is incomplete.", ledger)
+        raise SystemOptimizationRecoveryError("System optimization journal is incomplete.")
     try:
         for key, preimage in preimages.items(): _validate_host_preimage(key, preimage, spec=spec, paths=paths)
     except (StateValidationError, SystemOptimizationRecoveryError) as exc:
-        raise SystemOptimizationRecoveryError("System optimization journal is invalid.", ledger) from exc
+        raise SystemOptimizationRecoveryError("System optimization journal is invalid.") from exc
+    return payload, preimages
+
+
+def _set_journal_aside(path: Path, reason: str, reporter) -> None:
+    """Keep a journal no run can act on beside where it was, for diagnosis, so it stops no further run."""
+    aside = path.with_name(f"{path.name}.set-aside-{_now_for_path()}")
+    os.replace(path, aside)
+    fsync_directory(path.parent)
+    if reporter is not None:
+        reporter.line(messages.SYSTEM_PENDING_ROLLBACK_SET_ASIDE.format(reason=reason, path=aside))
+
+
+def _recover_pending_host_journal(
+    *, paths: RuntimePaths, root: Path, sudo_password: str | None, run, ledger: dict[str, Any], spec: SystemOptimizationsSpec, restarts: _ServiceRestarts,
+    reporter=None,
+) -> tuple[str | None, bool]:
+    """Finish a pending transaction; return the failure that left it pending, if recorded, and whether it finished.
+
+    A journal that can't be read or acted on is set aside at once. A rollback that fails is tried again by the next
+    runs and set aside after JOURNAL_RECOVERY_ATTEMPTS, leaving the host as it is."""
+    path = _journal_path(paths)
+    if not path.exists(): return None, False
+    try:
+        payload, preimages = _load_pending_host_journal(path, spec=spec, paths=paths)
+    except SystemOptimizationRecoveryError as exc:
+        _set_journal_aside(path, exc.message, reporter)
+        return None, False
     failure = payload.get("failure") if isinstance(payload.get("failure"), str) else None
     earlier = f" The run that left it failed with: {failure}" if failure else ""
     # A journal is only cleared by explicit post-state verification, never legacy action text.
@@ -4851,11 +4996,27 @@ def _recover_pending_host_journal(
         try:
             _restore_preimage_for_operation(key, preimage, paths=paths, spec=spec, root=root, sudo_password=sudo_password, run=run, restarts=restarts)
         except BaseException as exc:
-            raise SystemOptimizationRecoveryError(f"Pending host rollback failed: {_failure_text(exc)}{earlier}", ledger) from exc
+            if not isinstance(exc, Exception):
+                raise
+            _count_failed_recovery(path, payload, f"Pending host rollback failed: {_failure_text(exc)}", reporter, earlier, ledger, exc)
+            return failure, False
         if not _operation_matches_preimage(key, preimage=preimage, spec=spec, paths=paths, root=root, run=run):
-            raise SystemOptimizationRecoveryError(f"Pending host rollback could not be verified.{earlier}", ledger)
+            _count_failed_recovery(path, payload, "Pending host rollback could not be verified.", reporter, earlier, ledger, None)
+            return failure, False
     atomic_delete(path)
-    return failure
+    return failure, True
+
+
+def _count_failed_recovery(path: Path, payload: dict[str, Any], message: str, reporter, earlier: str, ledger: dict[str, Any], cause) -> None:
+    """Record a failed rollback attempt; raise to stop this run, or set the journal aside after the last attempt."""
+    attempts = payload.get("recovery_attempts")
+    attempts = (attempts if isinstance(attempts, int) and not isinstance(attempts, bool) and attempts > 0 else 0) + 1
+    if attempts >= JOURNAL_RECOVERY_ATTEMPTS:
+        _set_journal_aside(path, message, reporter)
+        return
+    atomic_write_text(path, json.dumps({**payload, "recovery_attempts": attempts}, sort_keys=True, indent=2) + "\n", mode=0o600, force_mode=True)
+    raise SystemOptimizationRecoveryError(f"{message}{earlier}", ledger) from cause
+
 
 def _restore_preimage_for_operation(
     operation_id: str,

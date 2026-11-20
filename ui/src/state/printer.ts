@@ -1,5 +1,6 @@
 import { MoonrakerClient, resolveMoonrakerOrigin, type ConnectionState } from '../moonraker/client'
 import { createStore, useStore } from '../lib/store'
+import { misreadGcodeNumber } from '../components/control/gcode'
 
 export type KlippyState = 'startup' | 'ready' | 'error' | 'shutdown' | 'disconnected' | 'unknown'
 // Klipper object status: object name -> field -> value. Values are whatever Klipper reports.
@@ -30,6 +31,11 @@ export type PrinterState = {
   commands: string[]
   /** configfile.settings for heaters, for target limits. */
   heaterSettings: Record<string, { min_temp?: number; max_temp?: number; target_max_temp?: number; target_min_temp?: number }>
+  /** All of configfile.settings (lower-case section names), queried once per Klipper start. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  settings: Record<string, Record<string, any>>
+  /** Moonraker's server.info: loaded components and registered file roots. */
+  server: { components: string[]; registered_directories: string[]; warnings: string[] } | null
   /** Moonraker's host statistics (machine.proc_stats / notify_proc_stat_update). */
   host: HostStats | null
   /** Bumped when Moonraker reports a file-list change. */
@@ -50,6 +56,8 @@ export const printer = createStore<PrinterState>({
   console: [],
   commands: [],
   heaterSettings: {},
+  settings: {},
+  server: null,
   host: null,
   filesRev: 0,
   historyRev: 0,
@@ -98,8 +106,33 @@ const SUBSCRIBE = [
   'tltg_',
   'mcu',
   'mcu ',
+  'configfile',
+  'bed_mesh',
+  'probe',
+  'heaters',
+  'system_stats',
+  'stepper_enable',
+  'query_endstops',
+  'z_tilt',
+  'quad_gantry_level',
+  'screws_tilt_adjust',
+  'manual_probe',
+  'firmware_retraction',
+  'input_shaper',
+  'smart_output_pin ',
+  'neopixel ',
+  'led ',
+  'dotstar ',
+  'pwm_cycle_time ',
+  'tmc2209 ',
+  'tmc2240 ',
+  'tmc5160 ',
+  'closed_loop ',
+  'gcode_macro TIMELAPSE_TAKE_FRAME',
 ]
 const extraMatchers: ((name: string) => boolean)[] = []
+// Objects subscribed to only some fields: configfile's settings are large and queried once instead.
+const FIELDS: Record<string, string[]> = { configfile: ['save_config_pending', 'save_config_pending_items', 'warnings'] }
 
 /** Lets feature modules subscribe to more objects (for example the QIDI Box). */
 export function registerObjects(match: (name: string) => boolean) {
@@ -180,10 +213,16 @@ export function pushConsole(text: string, kind: ConsoleLine['kind']) {
   printer.set((s) => ({ ...s, console: [...s.console.slice(-(CONSOLE_MAX - 1)), { id: ++lineId, time: Date.now(), text, kind }] }))
 }
 
-/** Runs G-code and records it, and any error, in the console. */
-export async function runGcode(script: string) {
+/**
+ * Runs G-code and records it, and any error, in the console. A command with a number Klipper would misread, such as
+ * `G1 X1e-7` (X1 and an extruder move), is refused instead of sent; `typed` sends what the operator typed, in the
+ * console or a macro's parameters, as they typed it.
+ */
+export async function runGcode(script: string, { typed = false }: { typed?: boolean } = {}) {
   pushConsole(script, 'command')
   try {
+    const misread = typed ? null : misreadGcodeNumber(script)
+    if (misread) throw new Error(`Not sent: Klipper would misread the number in ${misread}`)
     return await client.gcode(script)
   } catch (e) {
     pushConsole(e instanceof Error ? e.message : String(e), 'error')
@@ -196,12 +235,13 @@ let klippyPoll: ReturnType<typeof setTimeout> | null = null
 
 async function initKlippy() {
   if (klippyPoll) clearTimeout(klippyPoll)
-  let info: { klippy_state: KlippyState }
+  let info: { klippy_state: KlippyState; components?: string[]; registered_directories?: string[]; warnings?: string[] }
   try {
     info = await client.call('server.info')
   } catch {
     return
   }
+  printer.set((s) => ({ ...s, server: { components: info.components ?? [], registered_directories: info.registered_directories ?? [], warnings: info.warnings ?? [] } }))
   if (info.klippy_state !== 'ready') {
     let message = ''
     try {
@@ -213,8 +253,9 @@ async function initKlippy() {
     return
   }
   const { objects } = await client.call<{ objects: string[] }>('printer.objects.list')
-  const sub: Record<string, null> = {}
-  for (const o of objects) if (wanted(o)) sub[o] = null
+  const sub: Record<string, string[] | null> = {}
+  for (const o of objects) if (FIELDS[o]) sub[o] = FIELDS[o]
+  else if (wanted(o)) sub[o] = null
   const res = await client.call<{ status: Status }>('printer.objects.subscribe', { objects: sub })
   let temps: Record<string, TempSeries> = {}
   try {
@@ -225,10 +266,12 @@ async function initKlippy() {
   // Large, rarely-changing fields are queried once rather than subscribed.
   let commands: string[] = []
   let heaterSettings: PrinterState['heaterSettings'] = {}
+  let allSettings: PrinterState['settings'] = {}
   try {
     const q = await client.call<{ status: Status }>('printer.objects.query', { objects: { gcode: ['commands'], configfile: ['settings'] } })
     commands = Object.keys(q.status.gcode?.commands ?? {}).map((c) => c.toUpperCase())
     const settings = q.status.configfile?.settings ?? {}
+    allSettings = settings
     for (const [k, v] of Object.entries(settings)) if (k === 'extruder' || k === 'heater_bed' || k.startsWith('heater_generic ')) heaterSettings[k] = v as PrinterState['heaterSettings'][string]
   } catch {}
   // Recent console history, so a Box failure that happened before this page opened still shows its error.
@@ -237,7 +280,7 @@ async function initKlippy() {
     const g = await client.call<{ gcode_store: { message: string; time: number; type: 'command' | 'response' }[] }>('server.gcode_store', { count: 200 })
     consoleLines = g.gcode_store.map((l) => ({ id: ++lineId, time: l.time * 1000, text: l.message, kind: l.type === 'command' ? 'command' : l.message.startsWith('!!') ? 'error' : 'response' }))
   } catch {}
-  printer.set((s) => ({ ...s, klippy: 'ready', klippyMessage: '', objects, status: res.status, temps, commands, heaterSettings, console: consoleLines }))
+  printer.set((s) => ({ ...s, klippy: 'ready', klippyMessage: '', objects, status: res.status, temps, commands, heaterSettings, settings: allSettings, console: consoleLines }))
   client
     .call<ProcStat>('machine.proc_stats')
     .then((p) => applyHost(p, true))

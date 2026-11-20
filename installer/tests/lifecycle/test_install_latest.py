@@ -1,0 +1,186 @@
+from __future__ import annotations
+
+import hashlib
+import io
+import os
+import shutil
+import subprocess
+import sys
+import tarfile
+import unittest
+from pathlib import Path
+
+from installer.runtime.cli import parse_args
+from installer.runtime.manifest import load_manifest
+from installer.runtime.config_transaction import (
+    FileChangePlan,
+    StaleConfigurationPreimageError,
+    apply_file_change_plan,
+)
+from installer.runtime.rollback import RollbackJournal
+from installer.tests.helpers import REPO_ROOT, temp_path
+
+
+SCRIPT = REPO_ROOT / "installer/release/install-latest.sh"
+
+
+class CliArgumentTests(unittest.TestCase):
+    def test_auto_update_actions_are_exclusive_and_mode_bound(self):
+        with self.assertRaises(SystemExit):
+            parse_args(["auto-update", "--run", "--enable-systemd"])
+        with self.assertRaises(SystemExit):
+            parse_args(["install", "--run"])
+        self.assertEqual(parse_args(["auto-update", "--run"]).mode, "auto-update-check")
+
+    def test_a_run_outlives_the_ssh_session_closing(self):
+        # Closing the SSH session hangs up the terminal. A run stopped there has no rollback and can leave the printer
+        # half changed, so it goes on to its end with its terminal output dropped.
+        done = temp_path("hangup-") / "done"
+        script = (
+            "import os, signal, sys\n"
+            "from installer.runtime import cli\n"
+            "with cli._survives_hangup():\n"
+            "    os.kill(os.getpid(), signal.SIGHUP)\n"
+            "    print('after the hangup', flush=True)\n"
+            "    open(sys.argv[1], 'w').write('finished')\n"
+        )
+        result = subprocess.run([sys.executable, "-c", script, str(done)], cwd=REPO_ROOT, capture_output=True,
+                                text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(done.read_text(), "finished")
+        self.assertNotIn("after the hangup", result.stdout)
+
+    def test_auto_update_launcher_accepts_global_version(self):
+        result = subprocess.run(
+            ["/bin/sh", str(REPO_ROOT / "installer/release/auto-update.sh"), "--version"],
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        version = load_manifest(REPO_ROOT / "installer/package.yaml").package.version
+        self.assertIn(version, result.stdout)
+
+
+class ConfigTransactionTests(unittest.TestCase):
+    def test_composes_edits_and_rejects_a_stale_preimage_before_overwrite(self):
+        root = temp_path("config-transaction-")
+        first = root / "first.cfg"
+        second = root / "second.cfg"
+        first.write_text("before\n", encoding="utf-8")
+        second.write_text("untouched\n", encoding="utf-8")
+        plan = FileChangePlan()
+        plan.replace_text(first, "first edit\n")
+        plan.replace_text(first, plan.text(first).replace("first", "composed"))
+        plan.replace_text(second, "second edit\n")
+        first.write_text("concurrent change\n", encoding="utf-8")
+        journal = RollbackJournal(root / "recovery")
+
+        with self.assertRaises(StaleConfigurationPreimageError):
+            apply_file_change_plan(plan.changes(), journal=journal)
+
+        self.assertEqual(first.read_text(encoding="utf-8"), "concurrent change\n")
+        self.assertEqual(second.read_text(encoding="utf-8"), "untouched\n")
+
+
+def _make_archive(root: Path, members: dict[str, bytes]) -> Path:
+    archive_path = root / "bundle.tar.gz"
+    with tarfile.open(archive_path, "w:gz") as archive:
+        directories = {Path(name).parent.as_posix() for name in members if Path(name).parent.as_posix() != "."}
+        for directory in sorted(directories):
+            info = tarfile.TarInfo(directory)
+            info.type = tarfile.DIRTYPE
+            info.mode = 0o755
+            archive.addfile(info)
+        for name, payload in members.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(payload)
+            info.mode = 0o755 if name.endswith(".sh") else 0o644
+            archive.addfile(info, io.BytesIO(payload))
+    checksum_path = root / "bundle.tar.gz.sha256"
+    checksum_path.write_text(f"{hashlib.sha256(archive_path.read_bytes()).hexdigest()}  {archive_path.name}\n", encoding="utf-8")
+    return archive_path
+
+
+def _run_install_latest(home: Path, archive_path: Path, *, path: str | None = None) -> subprocess.CompletedProcess:
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "TLTG_INSTALLER_ARCHIVE_URL": archive_path.as_uri(),
+        "TLTG_INSTALLER_CHECKSUM_URL": (archive_path.parent / "bundle.tar.gz.sha256").as_uri(),
+    }
+    if path is not None:
+        env["PATH"] = path
+    return subprocess.run(["/bin/sh", str(SCRIPT), "--plain"], text=True, capture_output=True, env=env)
+
+
+def _path_without_checksum_tools(root: Path) -> str:
+    bin_dir = root / "bin"
+    bin_dir.mkdir()
+    for tool in ("curl", "tar", "mktemp", "rm", "mkdir", "mv", "grep", "find"):
+        target = shutil.which(tool)
+        if target is None:
+            raise AssertionError(f"missing required test tool: {tool}")
+        (bin_dir / tool).symlink_to(target)
+    return str(bin_dir)
+
+
+class InstallLatestTests(unittest.TestCase):
+    def test_missing_checksum_tool_fails_closed(self):
+        temp_root = temp_path("install-latest-")
+        home = temp_root / "home"
+        home.mkdir()
+        archive_path = _make_archive(
+            temp_root,
+            {"valve-oil/install.sh": b"#!/bin/sh\ntouch \"$HOME/installed\"\n"},
+        )
+
+        result = _run_install_latest(
+            home,
+            archive_path,
+            path=_path_without_checksum_tools(temp_root),
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Missing required tool: sha256sum or shasum", result.stderr)
+        self.assertFalse((home / "installed").exists())
+        self.assertFalse((home / "valve-oil").exists())
+
+    def test_invalid_archive_layout_fails_before_replacing_existing_install(self):
+        temp_root = temp_path("install-latest-")
+        home = temp_root / "home"
+        install_dir = home / "valve-oil"
+        install_dir.mkdir(parents=True)
+        marker = install_dir / "keep.txt"
+        marker.write_text("existing install", encoding="utf-8")
+        archive_path = _make_archive(temp_root, {"unexpected-root/install.sh": b"#!/bin/sh\nexit 0\n"})
+
+        result = _run_install_latest(home, archive_path)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Archive does not use the expected valve-oil/ root.", result.stderr)
+        self.assertEqual(marker.read_text(encoding="utf-8"), "existing install")
+
+    def test_valid_archive_replaces_install_and_runs_installer(self):
+        temp_root = temp_path("install-latest-")
+        home = temp_root / "home"
+        install_dir = home / "valve-oil"
+        install_dir.mkdir(parents=True)
+        (install_dir / "old.txt").write_text("old install", encoding="utf-8")
+        archive_path = _make_archive(
+            temp_root,
+            {
+                "valve-oil/install.sh": b"#!/bin/sh\ntouch \"$HOME/installed\"\n",
+                "valve-oil/new.txt": b"new install\n",
+            },
+        )
+
+        result = _run_install_latest(home, archive_path)
+
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertTrue((home / "installed").exists())
+        self.assertFalse((install_dir / "old.txt").exists())
+        self.assertEqual((install_dir / "new.txt").read_text(encoding="utf-8"), "new install\n")
+
+
+if __name__ == "__main__":
+    unittest.main()

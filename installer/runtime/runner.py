@@ -6,14 +6,14 @@ import urllib.request
 from dataclasses import replace
 
 from .addons_cli import maybe_update_installed_addons
-from . import boot_logo, klipper_cfg, messages, patches, progress, safety, update_window
+from . import boot_logo, boot_path, errors, klipper_cfg, messages, patches, progress, safety, update_window
 from .auto_update import (
     LOCK_HELD_ENV,
     adopt_legacy_enrollment,
     apply_auto_update_answer,
     settle_installed_bundle,
 )
-from .board_firmware import UNADMITTED_STATES
+from .board_firmware import UNADMITTED_STATES, existing_installation
 from .box_enablement import (
     maybe_initialize_box_motion,
     maybe_enable_box,
@@ -40,14 +40,20 @@ from .compatibility import (
     validate_patch_ledger,
 )
 from .config_transaction import FileChangePlan, apply_file_change_plan
-from .errors import PreviousPackageValidationError
+from .errors import (
+    HaltedKlipperDidNotStartError,
+    KlipperNotReadyError,
+    NewInstallKlipperNotReadyError,
+    PreviousPackageValidationError,
+    PrinterStateError,
+)
 from .firmware import detect_supported_firmware
 from .host_reboot import arm_auto_update_reboot_followup, reboot_pending
 from .interaction import (
     maybe_restart_klipper,
     maybe_restart_pending_service_if_idle,
 )
-from .legacy_manual_install import maybe_reset_legacy_manual_install
+from .legacy_manual_install import clear_install_started, mark_install_started, maybe_reset_legacy_manual_install
 from .manifest import active_patch_entries
 from .mirror import (
     collect_source_hashes,
@@ -81,6 +87,7 @@ from .source_patches import (
 from .process_restart import (
     ProcessRestartError,
     read_printer_info,
+    request_klipper_restart,
     restart_entries,
     restart_klipper_service,
     restart_pending,
@@ -102,6 +109,22 @@ from .system_optimizations import (
     validate_legacy_system_ledger,
     validate_system_ledger,
 )
+
+
+# A new install waits this long for a Klipper that is still starting, as after the touchscreen app restarts it.
+NEW_INSTALL_READY_WAIT_SECONDS = 60.0
+
+
+def ensure_klipper_ready_for_new_install(paths: RuntimePaths, *, urlopen=urllib.request.urlopen,
+                                         wait_seconds: float = NEW_INSTALL_READY_WAIT_SECONDS) -> None:
+    """Refuse a new install, before anything changes, unless Klipper is ready. Valve Oil isn't installed yet, so a
+    Klipper error comes from the printer itself, and installing over it can only hide that."""
+    try:
+        safety.ensure_klipper_ready(paths.moonraker_url, urlopen=urlopen, wait_seconds=wait_seconds)
+    except KlipperNotReadyError as exc:
+        raise NewInstallKlipperNotReadyError(exc.message) from exc
+    except PrinterStateError as exc:
+        raise NewInstallKlipperNotReadyError("Klipper's state could not be read") from exc
 
 
 def block_qidi_package_updates(admission) -> bool | None:
@@ -196,6 +219,12 @@ def run_install(
         )
     else:
         reporter.debug(event="install.prior_state.missing", state_path=state_path)
+    # Before anything else changes, the printer must be able to start again (boot_path.py).
+    boot_path.protect(paths, reporter=reporter, environ=env, dry_run=dry_run, run=run, input_stream=input_stream)
+    # Only an install over an existing Valve Oil may repair a Klipper halted on an error (_execute_install).
+    new_install = prior_state is None and not existing_installation(paths, manifest)
+    if new_install:
+        ensure_klipper_ready_for_new_install(paths, urlopen=urlopen)
 
     if saved_variable_verify_marker_path(paths).exists() and safety.klipper_halted(
         paths.moonraker_url, urlopen=urlopen
@@ -203,7 +232,8 @@ def run_install(
         # Kept until Klipper runs again; the install may be what lets it start.
         reporter.line(messages.SAVED_VARIABLE_CHECK_DEFERRED_KLIPPER_HALTED)
     else:
-        verify_pending_saved_variable_expectations(paths, clear=not dry_run, urlopen=urlopen)
+        verify_pending_saved_variable_expectations(paths, clear=not dry_run, urlopen=urlopen,
+                                                   earlier_run_reporter=reporter)
 
     reporter.status(messages.PERFORMING_PREFLIGHT_CHECKS)
     run_install_environment_preflight(
@@ -213,6 +243,7 @@ def run_install(
         reporter=reporter,
         urlopen=urlopen,
         disk_usage=disk_usage,
+        allow_halted=not new_install,
     )
     maybe_reset_legacy_manual_install(
         paths=paths,
@@ -242,7 +273,8 @@ def run_install(
         except (CompatibilityValidationError, SourcePatchError) as exc:
             raise PreviousPackageValidationError() from exc
     source_results = tuple(
-        classify_install_source_patch(paths=paths, patch=patch, firmware=detected_firmware, prior_state=prior_state)
+        classify_install_source_patch(paths=paths, patch=patch, firmware=detected_firmware, prior_state=prior_state,
+                                     upgrade_sources=compatibility)
         for patch in manifest.install.source_patches
     )
     started_at = utc_now()
@@ -291,6 +323,8 @@ def run_install(
             ),
             external_firmware=detected_firmware,
         )
+        if prior_state is None:
+            mark_install_started(paths, manifest.package.version)
         pruned_backups = prune_installer_backups(
             paths.printer_data_root,
             install_label_prefix=manifest.backup.label_prefix,
@@ -339,6 +373,7 @@ def run_install(
         reporter=reporter,
         detected_firmware=detected_firmware,
         prior_state=prior_state,
+        new_install=new_install,
         started_at=started_at,
         plan=plan,
         backup_zip_path=backup_zip_path,
@@ -404,6 +439,13 @@ def build_install_plan(
 
 
 
+def _note_outcome(exc: BaseException, outcome: str) -> None:
+    try:
+        exc.install_outcome = outcome
+    except AttributeError:
+        pass
+
+
 def _execute_install(
     *,
     paths: RuntimePaths,
@@ -411,6 +453,7 @@ def _execute_install(
     reporter,
     detected_firmware: str,
     prior_state: InstalledState | None,
+    new_install: bool = False,
     started_at,
     plan: InstallPlan,
     backup_zip_path,
@@ -465,9 +508,11 @@ def _execute_install(
             tracked_trees=1,
         )
 
-        # Saved variables go through Klipper. A Klipper halted on an error
-        # gets the files first, then a restart, then the saved variables.
+        # Saved variables go through Klipper. A Klipper halted on an error, on a printer that has Valve Oil, may be
+        # halted by Valve Oil's own files: it gets the Klipper files first and a restart, before anything else.
         klipper_halted = safety.klipper_halted(paths.moonraker_url, urlopen=urlopen)
+        if klipper_halted and new_install:
+            raise NewInstallKlipperNotReadyError(messages.klipper_not_ready("error"))
         if klipper_halted:
             reporter.line(messages.INSTALLING_WHILE_KLIPPER_HALTED)
         else:
@@ -544,6 +589,20 @@ def _execute_install(
         install_counters["postflight"][0] = 1
         reporter.emit_install_counters(**_freeze_counters(install_counters))
 
+        if klipper_halted:
+            # Nothing else changes, and nothing reboots, unless Klipper starts with these files; otherwise the files
+            # are put back below.
+            _restart_halted_klipper(paths=paths, manifest=manifest, reporter=reporter, urlopen=urlopen)
+            verify_pending_saved_variable_expectations(paths, urlopen=urlopen)
+            _update_saved_variables(
+                paths=paths,
+                reporter=reporter,
+                new_install=prior_state is None,
+                journal=journal,
+                written=saved_variables_written,
+                urlopen=urlopen,
+            )
+
         state = InstalledState(
             schema_version=1,
             package_id=manifest.package.id,
@@ -584,6 +643,7 @@ def _execute_install(
         )
         journal.note_write()
         write_installed_state(state_path, state)
+        clear_install_started(paths)
         migration_committed = True
         finalize_legacy_system_ledger_migration(paths)
         journal.commit()
@@ -622,6 +682,17 @@ def _execute_install(
             journal.rollback_or_raise(
                 exc, backup_label=plan.backup_label, backup_zip_path=backup_zip_path
             )
+            _note_outcome(exc, errors.OUTCOME_PUT_BACK)
+            if isinstance(exc, HaltedKlipperDidNotStartError):
+                # The failed process loaded the files that were just put back; start one with the files on disk.
+                try:
+                    request_klipper_restart(paths, urlopen=urlopen)
+                except ProcessRestartError:
+                    pass
+        else:
+            # Once the state is committed, Valve Oil's files stay installed: the system changes and boot logo that
+            # come after aren't undone by the journal, and a later run finishes them.
+            _note_outcome(exc, errors.OUTCOME_INSTALLED if journal.committed else errors.OUTCOME_UNCHANGED)
         if not journal.committed and not migration_committed:
             discard_legacy_system_ledger_migration(paths, migrated_paths)
         raise
@@ -649,13 +720,7 @@ def _execute_install(
     apply_auto_update_answer(paths=paths, reporter=reporter, answer=auto_updates, environ=environ)
     progress.step(progress.RESTART_KLIPPER, reporter)
     if klipper_halted:
-        _restart_halted_klipper_and_update_saved_variables(
-            paths=paths,
-            manifest=manifest,
-            reporter=reporter,
-            new_install=prior_state is None,
-            urlopen=urlopen,
-        )
+        pass  # restarted on the installed files before anything else changed
     elif paths.restart_marker_path.exists():
         if saved_variables_written:
             write_saved_variable_verify_marker(paths, saved_variables_written)
@@ -718,10 +783,8 @@ def _update_saved_variables(*, paths, reporter, new_install, journal, written, u
     )
 
 
-def _restart_halted_klipper_and_update_saved_variables(
-    *, paths, manifest: Manifest, reporter, new_install, urlopen
-) -> None:
-    """Restart a Klipper that was halted before the install, then update saved variables."""
+def _restart_halted_klipper(*, paths, manifest: Manifest, reporter, urlopen) -> None:
+    """Restart a Klipper that was halted before the install on the files just installed; raise unless it is ready."""
     reporter.line(messages.RESTARTING_HALTED_KLIPPER)
     try:
         if paths.restart_marker_path.exists():
@@ -734,18 +797,8 @@ def _restart_halted_klipper_and_update_saved_variables(
             restart_klipper_service(paths, urlopen=urlopen)
     except ProcessRestartError as exc:
         reporter.debug(event="install.halted_klipper.restart_failed", message=exc.message)
-        reporter.line(messages.HALTED_KLIPPER_DID_NOT_START)
-        return
+        raise HaltedKlipperDidNotStartError() from exc
     reporter.line(messages.KLIPPER_SERVICE_RESTARTED)
-    verify_pending_saved_variable_expectations(paths, urlopen=urlopen)
-    _update_saved_variables(
-        paths=paths,
-        reporter=reporter,
-        new_install=new_install,
-        journal=None,
-        written=None,
-        urlopen=urlopen,
-    )
 
 
 def _collect_install_patch_results(
@@ -769,14 +822,19 @@ def _collect_install_patch_results(
         path = paths.printer_data_root / patch.file
         text = klipper_cfg.read_text(path)
         current_section = _resolve_section_text_or_none(text, patch.section)
-        results.append(
-            _preserve_prior_section_expected(
-                patches.classify_install_section_delete(
-                    current_section, patch, detected_firmware
-                ),
-                prior_state,
-            )
+        result = _preserve_prior_section_expected(
+            patches.classify_install_section_delete(current_section, patch, detected_firmware),
+            prior_state,
         )
+        if result.classification == patches.INSTALL_NOOP_DESIRED and patches.is_section_hash(result.expected):
+            # Already deleted with no record of what it held: record QIDI's text so uninstall can put it back.
+            stock = patches.stock_section_text(
+                paths.installer_root / manifest.printer_for_firmware(detected_firmware).stock_snapshot(detected_firmware),
+                patch.file, patch.section, result.expected,
+            )
+            if stock is not None:
+                result = replace(result, expected=stock)
+        results.append(result)
     return tuple(results)
 
 
