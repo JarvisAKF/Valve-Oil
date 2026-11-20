@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
 import sys
+import threading
 import traceback
-from contextlib import nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext, suppress
 from dataclasses import replace
 from pathlib import Path
 
@@ -25,8 +27,8 @@ from .box_enablement import maybe_reconcile_tool_slots_after_box_count_change
 from .backup import BackupArchiveError
 from .compatibility import CompatibilityValidationError, load_supported_upgrade_sources, validate_manifest_compatibility
 from .demo import resolve_demo_tui_delay_seconds, run_demo
-from .errors import (ActivePrintError, InstallerError, KlipperNotReadyError, OperationCancelled, PrinterStateError,
-                     RecoveryRequiredError)
+from .errors import (ActivePrintError, InstallerError, KlipperNotReadyError, LockAcquisitionError, OperationCancelled,
+                     PrinterStateError, RecoveryRequiredError)
 from .host_reboot import (
     HostRebootError,
     maybe_schedule_recommended_reboot,
@@ -122,11 +124,41 @@ def main(
         reporter.debug(event="cli.log", path=run_log.path,
                        argv=" ".join(argv if argv is not None else sys.argv[1:]))
     try:
-        return _dispatch(args, env=env, bundle_root=bundle_root, reporter=reporter, paths=paths,
-                         input_stream=input_stream)
+        with _survives_hangup():
+            return _dispatch(args, env=env, bundle_root=bundle_root, reporter=reporter, paths=paths,
+                             input_stream=input_stream)
     finally:
         if run_log is not None:
             run_log.close()
+
+
+@contextmanager
+def _survives_hangup():
+    """Keep a run going when the SSH session closing hangs up its terminal.
+
+    The default SIGHUP stops the process at once, with no rollback and no record of where it was, which can leave the
+    printer half changed. The run instead goes on to its end and writes only its log: the terminal output is pointed at
+    /dev/null, so writing to a terminal that is gone can't fail it either. Questions are all asked first, so nothing
+    waits for an answer that can't come; one that does reads end of input."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def hung_up(signum, frame):
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        try:
+            for descriptor in (1, 2):
+                with suppress(OSError):
+                    os.dup2(devnull, descriptor)
+        finally:
+            os.close(devnull)
+        signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+
+    previous = signal.signal(signal.SIGHUP, hung_up)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGHUP, previous)
 
 
 def _dispatch(args, *, env, bundle_root, reporter, paths, input_stream, front_end=None) -> int:
@@ -255,7 +287,15 @@ def _dispatch(args, *, env, bundle_root, reporter, paths, input_stream, front_en
             return 0
 
         if args.mode == "auto-update-check":
-            with acquire(paths.lock_path):
+            with ExitStack() as held:
+                try:
+                    held.enter_context(acquire(paths.lock_path))
+                except LockAcquisitionError:
+                    # An install, uninstall, or update is running; the next hourly check sees what it leaves. A
+                    # failed run here would only mark the service failed.
+                    reporter.line(messages.AUTO_UPDATE_SKIPPED_ANOTHER_RUN)
+                    reporter.debug(event="cli.complete", mode=args.mode, return_code=0, action="skipped-locked")
+                    return 0
                 reporter.debug(
                     event="cli.lock.acquired",
                     mode=args.mode,
