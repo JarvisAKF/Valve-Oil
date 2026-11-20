@@ -119,7 +119,9 @@ class Session:
         if not self._update_folder_restored:
             self._restore_update_folder()
         try:
-            safety.ensure_printer_idle(self.paths.moonraker_url, urlopen=self.urlopen, wait_seconds=60.0)
+            # The install itself refuses a halted Klipper unless Valve Oil is installed and may be what halted it.
+            safety.ensure_printer_idle(self.paths.moonraker_url, urlopen=self.urlopen, wait_seconds=60.0,
+                                       allow_halted=True)
         except ActivePrintError as exc:
             return self._busy(exc)
         except PrinterStateError:
@@ -341,8 +343,11 @@ class Session:
         return os.path.ismount(self.drive) or (self.drive / "QD_Update").is_dir()
 
     def _restart(self) -> None:
+        from . import boot_path
         from .sudo import run_sudo
 
+        if not boot_path.boot_files_allow_reboot(self.paths, reporter=self.reporter, environ=self.env):
+            return
         password = getattr(self.hold, "password", None) or self.env.get("TLTG_OPTIMIZED_SUDO_PASSWORD") or ""
         run_sudo(["systemctl", "reboot"], run=self.run, password=password, timeout=60)
         self.sleep(60)  # the reboot ends this process
