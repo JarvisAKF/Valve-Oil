@@ -1,10 +1,10 @@
 ## ADDED Requirements
 
 ### Requirement: QIDI Plus 4 support
-The installer SHALL admit QIDI Plus 4 firmware `2.1.1` as the Plus 4, detected without a firmware manifest and versioned by `/root/xindi/version`, with its own stock snapshot, guarded-patch variants, macro folder, user `mks`, and home `/home/mks`. It SHALL apply no board firmware, touchscreen, or system optimization to a Plus 4 that is not declared for the Plus 4.
+The installer SHALL admit QIDI Plus 4 firmware `2.1.1` as the Plus 4, detected by `/dev_info.txt` and versioned by `/root/xindi/version` rather than a firmware manifest, with its own stock snapshot, guarded-patch variants, macro folder, user `mks`, and home `/home/mks`. It SHALL apply no board firmware, touchscreen, or system optimization to a Plus 4 that is not declared for the Plus 4.
 
 #### Scenario: Plus 4 firmware selects the Plus 4 baseline
-- **WHEN** installation starts on a printer identified as a Plus 4 whose `/root/xindi/version` reads `soc = V2.1.1`
+- **WHEN** installation starts on a printer whose `/dev_info.txt` reads `QIDI@x-plus_4` and whose `/root/xindi/version` reads `soc = V2.1.1`
 - **THEN** the Plus 4 stock snapshot, the Plus 4 variant of every guarded patch, and `installer/klipper/printers/plus4/` are used
 - **AND** every path the installer reads or writes is under `/home/mks` or a system path, never `/home/qidi`
 - **AND** a guarded patch with no Plus 4 variant leaves the Plus 4's value unchanged

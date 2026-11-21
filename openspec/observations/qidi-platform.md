@@ -298,6 +298,8 @@ The Plus 4 predates the Max 4 and Plus 5 and runs a different software generatio
 - **Runtime-confirmed (operator report, 2026-11-20, one Plus 4 on `2.1.1` with a Beacon probe conversion, without Valve Oil):** Debian GNU/Linux 10 (buster), system `python3` 3.7.3, glibc 2.28, `aarch64`. `/` is `/dev/mmcblk1p2`, 28 GB with 21 GB free, and `/home` is on it. `mks` needs a password for `sudo`. `/root` is mode 700, so `mks` can't read `/root/xindi/version`. `curl` and `wget` are installed. The printer could not resolve `raw.githubusercontent.com`.
 - **Runtime-confirmed (`scripts/collect_plus4.py`, 2026-11-21, same printer):**
   - Host: Armbian 22.05.0-trunk, kernel `5.16.20-rockchip64 #trunk SMP PREEMPT Mon Jul 25 01:58:45 UTC 2022`. Device tree model `Makerbase mks-pi`, compatible `firefly,roc-rk3328-cc rockchip,rk3328`: four Cortex-A53 cores (part `0xd03`) and 976 MB of memory. Armbian's own zram swap is on, 488 MB (`armbian-zram-config.service`, `zram-setup@zram0.service`).
+  - Model: `/dev_info.txt` is readable by `mks` and reads `QIDI@x-plus_4` with no trailing newline, the value QIDI's commented-out `preinst` check expects.
+  - Network: `/etc/resolv.conf` lists only public resolvers, `1.1.1.1`, `8.8.8.8`, and `223.6.6.6`, and a ping to `1.1.1.1` got no reply.
   - Firmware identity: `/root/xindi/version` (read with `sudo`) matches the payload's. `dpkg-query` lists no `QIDI-X-Plus4` package, so the update doesn't leave its package registered, and the `dpkg` database can't identify a Plus 4.
   - Services running or active include `klipper`, `klipper_mcu`, `moonraker`, `nginx`, `makerbase-client`, `QIDILink-client`, `cups`, `unattended-upgrades`, `hostapd`, `ipsec`, `xl2tpd`, `tuning`, `cpufrequtils`, `dhcpcd`, `network-manager`, `wpa_supplicant`, and `systemd-timesyncd`.
   - Klipper: `git describe` is `v0.12.0-65-g96ab9069-dirty`, and Moonraker reports `software_version` the same. 190 of the 199 `klippy` files match the assembled `PLUS4` + `2.1.1` tree. `mcu.py`, `stepper.py`, and `extras/bed_mesh.py`, `gcode_macro_break.py`, `gcode_move.py`, `probe.py`, `qdprobe.py`, `resonance_tester.py`, and `shaper_calibrate.py` match neither it nor any version in `QIDITECH/klipper` `PLUS4` history; whether QIDI's unpublished updates or this printer's changes made them is unknown. `extras/beacon.py` is a link into `/home/mks/beacon_klipper`, from the Beacon conversion.
@@ -308,9 +310,9 @@ The Plus 4 predates the Max 4 and Plus 5 and runs a different software generatio
 
 ### Unresolved
 
-- A file `mks` can read without `sudo` that names the printer model. QIDI's commented-out `preinst` check reads `/dev_info.txt` for `QIDI@x-plus_4`.
+- Whether every Plus 4 has `/dev_info.txt` with `QIDI@x-plus_4`, and what QIDI's other MKS-based printers write there.
 - Stock `plr.cfg`, `time_update.cfg`, `timelapse.cfg`, `KAMP_Settings.cfg`, and `KAMP/`, and the stock versions of the nine `klippy` files above.
-- Whether every Plus 4 on `2.1.1` lacks DNS for GitHub, or only this one.
+- Whether that printer's lookups failed because QIDI's image sets only public resolvers on a network that doesn't reach them, or because it had no route out at all; and whether other Plus 4s ship the same `resolv.conf`.
 - How the Plus 4's compiled Box modules differ from the Max 4 and Plus 5 builds in the methods Valve Oil's Box modules wrap.
 - Whether Valve Oil's Klipper extras, which parse under Python 3.7, run against QIDI's Plus 4 Klipper.
 - Main-loop load and memory while printing.
