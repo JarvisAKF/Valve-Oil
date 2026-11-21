@@ -150,6 +150,7 @@ def main():
 
     print("Collecting (read-only):")
     put("firmware/xindi_version.txt", xindi_version())
+    put("firmware/dev_info.txt", read("/dev_info.txt", 400))
     put("firmware/dpkg_qidi.txt", run("dpkg-query", "-W", "-f",
                                       "${Package} ${Version} ${Status}\n", "QIDI-X-Plus4")
         + run("dpkg-query", "-W", "-f", "${Package} ${Version}\n"))

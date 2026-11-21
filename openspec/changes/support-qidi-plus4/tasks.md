@@ -15,8 +15,8 @@
 
 ## 2. On a stock Plus 4, read-only
 
-- [ ] 2.1 Write a read-only collection script for Plus 4 owners and run it on a stock printer: the data table in `design.md`, plus `/var/lib/dpkg/status` for `QIDI-X-Plus4`. The script is `scripts/collect_plus4.py`; it runs on the printer's Python 3.7, redacts serial numbers, and reads no Wi-Fi or account files.
-- [ ] 2.2 Copy the factory `plr.cfg`, `time_update.cfg`, `timelapse.cfg`, `KAMP_Settings.cfg`, and `KAMP/` into the snapshot, with SHA-256.
+- [ ] 2.1 Write a read-only collection script for Plus 4 owners and run it on a stock printer: the data table in `design.md`, plus a model identifier readable without `sudo`. The script is `scripts/collect_plus4.py`; it runs on the printer's Python 3.7, redacts serial numbers, and reads no Wi-Fi or account files. It has run on one Beacon-converted `2.1.1` printer (recorded in the observations); a stock printer is still needed, and so is a model identifier `mks` can read (D3).
+- [ ] 2.2 Copy the factory `plr.cfg`, `time_update.cfg`, `timelapse.cfg`, `KAMP_Settings.cfg`, and `KAMP/` into the snapshot, with SHA-256. The modified printer's copies don't match QIDI's published history, so they wait for a stock printer.
 - [ ] 2.3 Compare the full `~/klipper` and `~/moonraker` trees with the payload and with `QIDITECH/klipper` `PLUS4`.
 - [ ] 2.4 Run the downloaded interpreter on the printer: `bootstrap.py --version` and a dry run.
 - [ ] 2.5 Time stock `G28` repeatedly and keep the `klippy.log` lines.
