@@ -302,6 +302,7 @@ The Plus 4 predates the Max 4 and Plus 5 and runs a different software generatio
   - Model: `/dev_info.txt` is readable by `mks` and reads `QIDI@x-plus_4` with no trailing newline, the value QIDI's commented-out `preinst` check expects.
   - Network: `/etc/resolv.conf` lists only public resolvers, `1.1.1.1`, `8.8.8.8`, and `223.6.6.6`. `/etc/hosts` pins `github.com` (`140.82.113.3`), `gist.github.com`, and `assets-cdn.github.com`, so `github.com` resolved while every other name timed out. The default route was the LAN router, which answered pings; nothing beyond it answered, not even a TCP connection to a GitHub address given directly.
   - Firewall: `iptables` held, twice over, `INPUT` and `FORWARD` rules accepting `eth0` traffic from `192.168.1.0/24` and dropping the rest, and loopback traffic from outside `127.0.0.0/24`, with no rule for established connections. Replies from the internet were dropped, which explains the network results, and so was the printer's own connection to its LAN address over loopback.
+  - Turning LAN mode off on the touchscreen restored internet access: afterwards `curl https://1.1.1.1` got `HTTP/2 301`.
   - Firmware identity: `/root/xindi/version` (read with `sudo`) matches the payload's. `dpkg-query` lists no `QIDI-X-Plus4` package, so the update doesn't leave its package registered, and the `dpkg` database can't identify a Plus 4.
   - Services running or active include `klipper`, `klipper_mcu`, `moonraker`, `nginx`, `makerbase-client`, `QIDILink-client`, `cups`, `unattended-upgrades`, `hostapd`, `ipsec`, `xl2tpd`, `tuning`, `cpufrequtils`, `dhcpcd`, `network-manager`, `wpa_supplicant`, and `systemd-timesyncd`.
   - Klipper: `git describe` is `v0.12.0-65-g96ab9069-dirty`, and Moonraker reports `software_version` the same. 190 of the 199 `klippy` files match the assembled `PLUS4` + `2.1.1` tree. `mcu.py`, `stepper.py`, and `extras/bed_mesh.py`, `gcode_macro_break.py`, `gcode_move.py`, `probe.py`, `qdprobe.py`, `resonance_tester.py`, and `shaper_calibrate.py` match neither it nor any version in `QIDITECH/klipper` `PLUS4` history; whether QIDI's unpublished updates or this printer's changes made them is unknown. `extras/beacon.py` is a link into `/home/mks/beacon_klipper`, from the Beacon conversion.
@@ -314,7 +315,7 @@ The Plus 4 predates the Max 4 and Plus 5 and runs a different software generatio
 
 - Whether every Plus 4 has `/dev_info.txt` with `QIDI@x-plus_4`, and what QIDI's other MKS-based printers write there.
 - Stock `plr.cfg`, `time_update.cfg`, `timelapse.cfg`, `KAMP_Settings.cfg`, and `KAMP/`, and the stock versions of the nine `klippy` files above.
-- Which touchscreen control turns the Plus 4's LAN-only mode on and off, and whether turning it off runs `iptables -F` and restores internet access.
+- Which screen holds the Plus 4's LAN mode switch, whether turning it off left `iptables` empty, and whether the rules come back at boot while it's off.
 - How the Plus 4's compiled Box modules differ from the Max 4 and Plus 5 builds in the methods Valve Oil's Box modules wrap.
 - Whether Valve Oil's Klipper extras, which parse under Python 3.7, run against QIDI's Plus 4 Klipper.
 - Main-loop load and memory while printing.
