@@ -3,9 +3,9 @@
 - [x] 1.1 Record the `2.1.1` SOC payload and one owner's runtime report in the Plus 4 observations.
 - [x] 1.2 Add `installer/stock/qidi-plus4-defaults/firmwares/plus4-2.1.1/` from the payload's `printer_data/config`, and check it against the payload hashes. The factory files not in the payload follow in 2.2.
 - [x] 1.3 Add the Python 3.7 syntax check for `installer/klipper/` (D6) and list it under **Validation** in `AGENTS.md`.
-- [ ] 1.4 Classify every common macro file by the QIDI macros and Klipper objects it uses: printer-neutral, needs a Plus 4 version, or not for the Plus 4. Classify every guarded patch, source patch, extra module, and `system_optimizations` entry the same way.
-- [ ] 1.5 Load each extra module against QIDI's Plus 4 Klipper (the payload's files over `QIDITECH/klipper` `PLUS4`) under Python 3.7, and record which ones import and register.
-- [ ] 1.6 Compare the Plus 4's `box_extras.so`, `box_stepper.so`, and `multi_color_controller.so` with the Plus 5 builds in the vendor harness, covering every method a package Box module wraps or calls. Record the result in the QIDI Box observations.
+- [x] 1.4 Classify every common macro file by the QIDI macros and Klipper objects it uses: printer-neutral, needs a Plus 4 version, or not for the Plus 4. Classify every guarded patch, source patch, extra module, and `system_optimizations` entry the same way.
+- [ ] 1.5 Load each extra module against QIDI's Plus 4 Klipper (the payload's files over `QIDITECH/klipper` `PLUS4`) under Python 3.7, and record which ones import and register. The static import check is done and recorded in `inventory.md`; loading under 3.7 waits for a Python 3.7 environment or the printer (2.4).
+- [ ] 1.6 Compare the Plus 4's `box_extras.so`, `box_stepper.so`, and `multi_color_controller.so` with the Plus 5 builds in the vendor harness, covering every method a package Box module wraps or calls. Record the result in the QIDI Box observations. A strings check is done: the Plus 4 builds name 24 of the 25 QIDI-specific lookups checked, all but `_pause_print_retry_flow` (optional).
 - [ ] 1.7 Draft `installer/klipper/printers/plus4/` from QIDI's `2.1.1` macros, with stock coordinates, currents, speeds, and dwells, and only the improvements D8 lists.
 - [ ] 1.8 Add printer `user` and `home` to the manifest and derive the runtime paths from the detected printer (D4). Add Plus 4 detection and version reading (D3).
 - [ ] 1.9 Add the Plus 4 interpreter step to the launchers (D5), pinned by SHA-256, and the uninstall step that removes it.
